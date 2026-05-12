@@ -2,7 +2,7 @@
 
 Punch or Judy Studios is a local-first AI puppet show studio powered by the Puppet Forge engine. It lets people create original characters, generate dialogue with local or optional cloud models, synthesize stylized local voices, animate 2D puppets, and export a local render bundle. If FFmpeg is installed, the renderer also produces MP4.
 
-## What Works In This V0.3
+## What Works In This V0.4
 
 - Original bundled cast and scenes.
 - Custom character editor with lore, speech style, personality sliders, voice pitch/pace, and puppet colors.
@@ -10,7 +10,7 @@ Punch or Judy Studios is a local-first AI puppet show studio powered by the Pupp
 - Provider registry for Local Scriptwright, Ollama/local, OpenAI, Claude, Gemini, and a disabled future Sora adapter.
 - Local SQLite storage in the user's app-data folder.
 - Local deterministic script fallback, so no API key is required.
-- Local formant-based PuppetVoice synthesis with line, word, phoneme, and viseme timing.
+- Local PuppetVoice v0.4 formant synthesis with clearer G2P rules, line cues, word cues, phoneme cues, visemes, and engine-versioned audio regeneration.
 - Psiren-inspired PGF audio cleanup, warmth, clarity, declick, and normalization.
 - Local 2D puppet renderer with speaker spotlights, blink/gaze/gesture motion, preview SVG, subtitles, WAV, self-contained ZIP bundles, and optional FFmpeg MP4.
 - Windows-first launcher: double-click `START_HERE_WINDOWS.bat`.
@@ -69,5 +69,7 @@ Generate local voice audition WAVs:
 ```powershell
 python scripts\audition_voice.py
 ```
+
+The audition harness writes per-character WAVs plus a manifest with phoneme transcripts, timing cues, peak, RMS, and duration metrics.
 
 See `docs/ARCHITECTURE.md`, `docs/LOCAL_MODELS.md`, and `docs/API_KEYS.md`.

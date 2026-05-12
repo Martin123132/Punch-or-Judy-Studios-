@@ -37,7 +37,7 @@ from .storage import (
     search_memory,
     set_setting,
 )
-from .voice import synthesize_performance
+from .voice import audio_track_is_current, synthesize_performance
 
 
 ROOT = repo_root()
@@ -325,7 +325,7 @@ class PuppetForgeHandler(BaseHTTPRequestHandler):
             scene = get_scene(con, performance["scene_id"]) or list_scenes(con)[0]
             characters = list_characters(con)
             tracks = list_audio_tracks(con, performance_id)
-            if tracks and tracks[0].get("word_cues"):
+            if tracks and audio_track_is_current(tracks[0]):
                 audio = tracks[0]
             else:
                 audio_track = synthesize_performance(performance, characters, outputs_dir() / performance_id)

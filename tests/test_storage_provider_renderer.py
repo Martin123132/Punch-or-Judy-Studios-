@@ -11,7 +11,7 @@ from puppet_forge.defaults import DEFAULT_CHARACTERS, DEFAULT_SCENES
 from puppet_forge.prompting import make_performance
 from puppet_forge.renderer import render_performance
 from puppet_forge.storage import connect, list_characters, list_scenes, save_performance, search_memory
-from puppet_forge.voice import synthesize_performance
+from puppet_forge.voice import AUDIO_ENGINE_VERSION, synthesize_performance
 
 
 class StorageProviderRendererTests(unittest.TestCase):
@@ -77,7 +77,12 @@ class StorageProviderRendererTests(unittest.TestCase):
             self.assertTrue(manifest["cast"][0]["rig"])
             self.assertTrue(manifest["audio"]["line_cues"])
             self.assertTrue(manifest["audio"]["word_cues"])
+            self.assertEqual(manifest["audio"]["engine_version"], AUDIO_ENGINE_VERSION)
+            self.assertTrue(manifest["audio"]["phoneme_cues"])
+            self.assertEqual(manifest["audio"]["phoneme_count"], len(manifest["audio"]["phoneme_cues"]))
             self.assertEqual(manifest["motion_cues"]["gesture_source"], "word_cues")
+            self.assertEqual(manifest["motion_cues"]["engine_version"], AUDIO_ENGINE_VERSION)
+            self.assertGreater(manifest["motion_cues"]["phoneme_count"], 0)
             self.assertEqual(manifest["stage_style"]["renderer"], "local-2d-puppet-stage")
 
 

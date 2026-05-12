@@ -305,6 +305,8 @@ def _motion_cues(audio_track: dict[str, Any]) -> dict[str, Any]:
         "blink_cycle_seconds": 4.8,
         "line_count": len(audio_track.get("line_cues") or []),
         "word_count": len(audio_track.get("word_cues") or []),
+        "phoneme_count": len(audio_track.get("phoneme_cues") or []),
+        "engine_version": audio_track.get("engine_version", ""),
     }
 
 
@@ -325,10 +327,13 @@ def write_manifest(
         "stage_style": _stage_style(scene),
         "motion_cues": _motion_cues(audio_track),
         "audio": {
+            "engine_version": audio_track.get("engine_version", ""),
             "duration_seconds": audio_track.get("duration_seconds"),
             "wav": Path(str(audio_track.get("wav_path", ""))).name,
             "line_cues": audio_track.get("line_cues") or [],
             "word_cues": audio_track.get("word_cues") or [],
+            "phoneme_count": len(audio_track.get("phoneme_cues") or []),
+            "phoneme_cues": audio_track.get("phoneme_cues") or [],
             "viseme_count": len(audio_track.get("visemes") or []),
             "visemes": audio_track.get("visemes") or [],
         },
@@ -350,9 +355,11 @@ def write_preview_html(
         "performance": performance,
         "scene": scene,
         "audio": {
+            "engine_version": audio_track.get("engine_version", ""),
             "duration_seconds": audio_track.get("duration_seconds"),
             "line_cues": audio_track.get("line_cues") or [],
             "word_cues": audio_track.get("word_cues") or [],
+            "phoneme_cues": audio_track.get("phoneme_cues") or [],
             "visemes": audio_track.get("visemes") or [],
         },
         "render": render_job.to_dict(),

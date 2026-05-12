@@ -10,15 +10,26 @@ if str(ROOT) not in sys.path:
 
 from puppet_forge.defaults import DEFAULT_CHARACTERS
 from puppet_forge.paths import outputs_dir
-from puppet_forge.audio import write_wav
-from puppet_forge.voice import SAMPLE_RATE, synthesize_text
+from puppet_forge.audio import duration_seconds, rms, write_wav
+from puppet_forge.voice import AUDIO_ENGINE_VERSION, SAMPLE_RATE, synthesize_text
 
 
 PHRASES = [
     "hello local stage",
     "sound first, motion second",
     "the puppet voice is clear now",
+    "through the quiet show, the puppet can dance",
+    "this local voice does not need a cloud key",
 ]
+
+
+def _metrics(samples: list[float]) -> dict[str, float]:
+    peak = max((abs(sample) for sample in samples), default=0.0)
+    return {
+        "duration_seconds": round(duration_seconds(samples, SAMPLE_RATE), 3),
+        "peak": round(peak, 4),
+        "rms": round(rms(samples), 4),
+    }
 
 
 def main() -> None:
@@ -29,14 +40,21 @@ def main() -> None:
         voice = character.voice.to_dict() if character.voice else {}
         safe_name = character.id.replace("/", "-")
         for index, phrase in enumerate(PHRASES, start=1):
-            samples, visemes, word_cues = synthesize_text(phrase, voice, "bright" if index == 3 else "steady")
-            wav_path = out_dir / f"{safe_name}-{index}.wav"
+            emotion = "bright" if index in {3, 5} else "steady"
+            samples, visemes, word_cues, phoneme_cues = synthesize_text(phrase, voice, emotion)
+            wav_path = out_dir / f"{safe_name}-{index:02d}.wav"
             write_wav(wav_path, samples, SAMPLE_RATE)
             manifest.append(
                 {
+                    "engine_version": AUDIO_ENGINE_VERSION,
                     "character": character.name,
+                    "character_id": character.id,
+                    "emotion": emotion,
                     "phrase": phrase,
                     "wav_path": str(wav_path),
+                    **_metrics(samples),
+                    "phonemes": [cue["phoneme"] for cue in phoneme_cues],
+                    "phoneme_cues": phoneme_cues,
                     "viseme_count": len(visemes),
                     "word_cues": word_cues,
                 }

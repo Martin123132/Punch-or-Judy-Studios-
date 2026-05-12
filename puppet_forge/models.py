@@ -119,6 +119,8 @@ class AudioTrack:
     visemes: list[dict[str, Any]]
     line_cues: list[dict[str, Any]] = field(default_factory=list)
     word_cues: list[dict[str, Any]] = field(default_factory=list)
+    phoneme_cues: list[dict[str, Any]] = field(default_factory=list)
+    engine_version: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
