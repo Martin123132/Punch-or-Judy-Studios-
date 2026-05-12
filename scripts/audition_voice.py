@@ -14,13 +14,14 @@ from puppet_forge.audio import duration_seconds, rms, write_wav
 from puppet_forge.voice import AUDIO_ENGINE_VERSION, SAMPLE_RATE, synthesize_text
 
 
-PHRASES = [
-    "hello local stage",
-    "sound first, motion second",
-    "the puppet voice is clear now",
-    "through the quiet show, the puppet can dance",
-    "this local voice does not need a cloud key",
-]
+PHRASE_SETS = {
+    "v0.5-clear": [
+        "hello local stage",
+        "sound first, motion second",
+        "the puppet voice is clear now",
+        "this local voice does not need a cloud key",
+    ]
+}
 
 
 def _metrics(samples: list[float]) -> dict[str, float]:
@@ -33,20 +34,23 @@ def _metrics(samples: list[float]) -> dict[str, float]:
 
 
 def main() -> None:
-    out_dir = outputs_dir() / "voice-auditions"
+    phrase_set = "v0.5-clear"
+    phrases = PHRASE_SETS[phrase_set]
+    out_dir = outputs_dir() / "voice-auditions" / phrase_set
     out_dir.mkdir(parents=True, exist_ok=True)
     manifest = []
     for character in DEFAULT_CHARACTERS:
         voice = character.voice.to_dict() if character.voice else {}
         safe_name = character.id.replace("/", "-")
-        for index, phrase in enumerate(PHRASES, start=1):
-            emotion = "bright" if index in {3, 5} else "steady"
+        for index, phrase in enumerate(phrases, start=1):
+            emotion = "bright" if index == 3 else "steady"
             samples, visemes, word_cues, phoneme_cues = synthesize_text(phrase, voice, emotion)
             wav_path = out_dir / f"{safe_name}-{index:02d}.wav"
             write_wav(wav_path, samples, SAMPLE_RATE)
             manifest.append(
                 {
                     "engine_version": AUDIO_ENGINE_VERSION,
+                    "phrase_set": phrase_set,
                     "character": character.name,
                     "character_id": character.id,
                     "emotion": emotion,

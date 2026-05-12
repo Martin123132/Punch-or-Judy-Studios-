@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 import re
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -12,8 +12,8 @@ from .models import AudioTrack
 
 
 SAMPLE_RATE = 22050
-AUDIO_ENGINE_VERSION = "puppetvoice-0.4"
-MAX_HARMONIC = 14
+AUDIO_ENGINE_VERSION = "puppetvoice-0.5"
+CLEAR_BASE_FREQUENCY = 158.0
 WORD_RE = re.compile(r"[a-z0-9]+(?:'[a-z0-9]+)?|[.,!?;:-]")
 PUNCTUATION_PAUSES = {
     ",": 0.12,
@@ -45,6 +45,24 @@ class SpeechUnit:
     word: str | None = None
     punctuation: str | None = None
     stress: float = 1.0
+
+
+@dataclass
+class ResonatorState:
+    y1: float = 0.0
+    y2: float = 0.0
+
+
+@dataclass
+class SourceFilterState:
+    phase: float = 0.0
+    formant_states: list[ResonatorState] = field(default_factory=lambda: [ResonatorState(), ResonatorState(), ResonatorState()])
+    previous_formants: tuple[float, float, float] = (500.0, 1500.0, 2500.0)
+    dc_input: float = 0.0
+    dc_output: float = 0.0
+    noise_lowpass: float = 0.0
+    radiation_previous: float = 0.0
+    smoothing: float = 0.0
 
 
 CONTRACTIONS = {
@@ -388,48 +406,113 @@ def _phoneme_duration(spec: PhonemeSpec, pace: float, stress: float) -> float:
     return duration / max(0.35, pace)
 
 
-def _formant_weight(freq: float, formants: tuple[float, float, float], amplitudes: tuple[float, float, float], brightness: float) -> float:
-    weight = 0.0
-    bandwidths = (120.0, 190.0, 280.0)
-    for formant, amp, bandwidth in zip(formants, amplitudes, bandwidths):
-        weight += amp * math.exp(-((freq - formant) ** 2) / (2.0 * bandwidth * bandwidth))
-    tilt = 1.0 / (1.0 + (freq / (1850.0 + brightness * 900.0)) ** 1.45)
-    return weight * (0.34 + brightness * 0.36 + tilt)
+def _smoothstep(value: float) -> float:
+    value = clamp(value, 0.0, 1.0)
+    return value * value * (3.0 - 2.0 * value)
 
 
-def _voiced_weights(freq: float, spec: PhonemeSpec, brightness: float) -> tuple[list[tuple[int, float]], float]:
-    weights: list[tuple[int, float]] = []
-    norm = 0.0
-    for harmonic in range(1, MAX_HARMONIC + 1):
-        harmonic_freq = freq * harmonic
-        if harmonic_freq > 4200:
-            break
-        weight = _formant_weight(harmonic_freq, spec.formants, spec.amplitudes, brightness) / harmonic
-        weights.append((harmonic, weight))
-        norm += abs(weight)
-    return weights, max(0.12, norm)
+def _resonator_coefficients(frequency: float, bandwidth: float) -> tuple[float, float, float]:
+    frequency = clamp(frequency, 80.0, SAMPLE_RATE * 0.46)
+    bandwidth = clamp(bandwidth, 35.0, 1200.0)
+    radius = math.exp(-math.pi * bandwidth / SAMPLE_RATE)
+    theta = 2.0 * math.pi * frequency / SAMPLE_RATE
+    gain = 1.0 - radius
+    return gain, 2.0 * radius * math.cos(theta), -(radius * radius)
 
 
-def _voiced_sample(sample_index: int, phase: float, weights: list[tuple[int, float]], norm: float, warmth: float, grit: float) -> float:
-    total = 0.0
-    for harmonic, weight in weights:
-        total += math.sin(phase * harmonic) * weight
-    breath = _noise(sample_index) * grit * 0.012
-    warm = math.sin(phase * 0.5) * warmth * 0.045
-    return (total / norm) * 0.58 + warm + breath
+def _resonator_step(source: float, state: ResonatorState, frequency: float, bandwidth: float) -> float:
+    gain, a1, a2 = _resonator_coefficients(frequency, bandwidth)
+    value = gain * source + a1 * state.y1 + a2 * state.y2
+    if not math.isfinite(value):
+        state.y1 = 0.0
+        state.y2 = 0.0
+        return 0.0
+    state.y2 = state.y1
+    state.y1 = clamp(value, -8.0, 8.0)
+    return state.y1
 
 
-def _filtered_noise(sample_index: int, spec: PhonemeSpec, brightness: float) -> float:
+def _glottal_source(phase: float, open_quotient: float = 0.62) -> float:
+    phase = phase % 1.0
+    open_quotient = clamp(open_quotient, 0.45, 0.74)
+    if phase < open_quotient:
+        x = phase / open_quotient
+        if x < 0.68:
+            rise = 0.5 - 0.5 * math.cos(math.pi * x / 0.68)
+            return rise * 1.22 - 0.42
+        close = (x - 0.68) / 0.32
+        return 0.76 - 1.46 * close
+    close_x = (phase - open_quotient) / max(1e-6, 1.0 - open_quotient)
+    return -0.34 * math.exp(-9.0 * close_x)
+
+
+def _advance_glottis(state: SourceFilterState, frequency: float) -> float:
+    state.phase = (state.phase + frequency / SAMPLE_RATE) % 1.0
+    return state.phase
+
+
+def _aspiration_noise(sample_index: int, state: SourceFilterState, brightness: float) -> float:
     raw = _noise(sample_index)
     raw2 = _noise(sample_index + 17)
-    rough = raw * (0.72 + brightness * 0.18) + raw2 * 0.16
-    if spec.symbol in {"s", "z"}:
-        rough *= 1.08
-    elif spec.symbol in {"sh", "zh", "ch"}:
-        rough *= 0.98
-    elif spec.symbol in {"f", "v", "th", "dh"}:
-        rough *= 0.74
-    return rough * spec.noise
+    mixed = raw * 0.78 + raw2 * 0.22
+    state.noise_lowpass = state.noise_lowpass * 0.68 + mixed * 0.32
+    high = mixed - state.noise_lowpass * (0.58 - brightness * 0.22)
+    return clamp(high, -1.0, 1.0)
+
+
+def _bandwidths_for(spec: PhonemeSpec, brightness: float) -> tuple[float, float, float]:
+    if spec.kind == "vowel":
+        base = (82.0, 132.0, 220.0)
+    elif spec.kind in {"liquid", "glide"}:
+        base = (95.0, 155.0, 245.0)
+    elif spec.kind == "nasal":
+        base = (70.0, 120.0, 210.0)
+    elif spec.kind in {"fricative", "affricate"}:
+        base = (150.0, 260.0, 520.0)
+    else:
+        base = (115.0, 190.0, 340.0)
+    scale = 1.06 - brightness * 0.18
+    return (base[0] * scale, base[1] * scale, base[2] * scale)
+
+
+def _interpolated_formants(state: SourceFilterState, target: tuple[float, float, float], pos: float, brightness: float) -> tuple[float, float, float]:
+    amount = _smoothstep(min(1.0, pos * 1.65))
+    scale = 0.97 + (brightness - 0.5) * 0.05
+    formants = tuple((old + (new - old) * amount) * scale for old, new in zip(state.previous_formants, target))
+    return (formants[0], formants[1], formants[2])
+
+
+def _dc_block(value: float, state: SourceFilterState) -> float:
+    out = value - state.dc_input + 0.995 * state.dc_output
+    state.dc_input = value
+    state.dc_output = clamp(out, -4.0, 4.0)
+    return state.dc_output
+
+
+def _vocal_tract_filter(
+    excitation: float,
+    spec: PhonemeSpec,
+    state: SourceFilterState,
+    pos: float,
+    brightness: float,
+    warmth: float,
+) -> float:
+    formants = _interpolated_formants(state, spec.formants, pos, brightness)
+    bandwidths = _bandwidths_for(spec, brightness)
+    total = 0.0
+    for index, (frequency, bandwidth, amp) in enumerate(zip(formants, bandwidths, spec.amplitudes)):
+        if index >= len(state.formant_states):
+            state.formant_states.append(ResonatorState())
+        resonated = _resonator_step(excitation, state.formant_states[index], frequency, bandwidth)
+        total += resonated * amp * (1.0 + index * (0.28 + brightness * 0.18))
+    direct = 0.05 if spec.kind in {"vowel", "liquid", "glide", "nasal"} else 0.18
+    filtered = _dc_block(total + excitation * direct, state)
+    radiated = filtered - state.radiation_previous * 0.985
+    state.radiation_previous = filtered
+    filtered = radiated * 0.72 + filtered * 0.28
+    smoothing = 0.18 + warmth * 0.18
+    state.smoothing = state.smoothing * smoothing + filtered * (1.0 - smoothing)
+    return clamp(state.smoothing, -3.0, 3.0)
 
 
 def _envelope(pos: float, kind: str) -> float:
@@ -453,7 +536,7 @@ def _fade_for_kind(kind: str) -> int:
 def _render_phoneme(
     spec: PhonemeSpec,
     count: int,
-    phase: float,
+    state: SourceFilterState,
     base_freq: float,
     pitch_target: float,
     brightness: float,
@@ -461,25 +544,51 @@ def _render_phoneme(
     grit: float,
     energy: float,
     sample_offset: int,
-) -> tuple[SampleBuffer, float]:
+) -> SampleBuffer:
     samples: SampleBuffer = []
     burst_count = max(1, int(0.018 * SAMPLE_RATE))
+    release_start = int(count * 0.42) if spec.kind == "stop" else 0
     nominal_freq = base_freq * (1.0 + pitch_target)
-    weights, norm = _voiced_weights(nominal_freq, spec, brightness) if spec.voiced else ([], 1.0)
     for n in range(count):
         pos = n / max(1, count - 1)
         freq = nominal_freq * (1.0 + math.sin((sample_offset + n) / SAMPLE_RATE * 6.0) * 0.006)
-        phase += 2.0 * math.pi * freq / SAMPLE_RATE
+        phase = _advance_glottis(state, freq)
         env = _envelope(pos, spec.kind)
-        sample = 0.0
-        if spec.voiced:
-            sample = _voiced_sample(sample_offset + n, phase, weights, norm, warmth, grit)
-        if spec.noise:
-            sample += _filtered_noise(sample_offset + n, spec, brightness) * (0.62 if spec.voiced else 1.0)
-        if spec.burst and n < burst_count:
-            sample += _noise(sample_offset + n + 101) * spec.burst * (1.0 - n / burst_count)
-        samples.append(clamp(sample * env * energy * 0.62))
-    return samples, phase
+        noise = _aspiration_noise(sample_offset + n, state, brightness)
+        glottal = _glottal_source(phase, 0.59 + warmth * 0.08)
+        excitation = 0.0
+
+        if spec.kind == "stop":
+            if n < release_start:
+                excitation = glottal * 0.055 if spec.voiced else 0.0
+            else:
+                release_pos = n - release_start
+                if release_pos < burst_count:
+                    excitation += noise * spec.burst * (1.0 - release_pos / burst_count) * 1.25
+                excitation += glottal * (0.46 if spec.voiced else 0.08)
+        elif spec.kind == "affricate":
+            if n < burst_count:
+                excitation += noise * spec.burst * (1.0 - n / burst_count)
+            excitation += noise * max(spec.noise, 0.18) * 1.12
+            if spec.voiced:
+                excitation += glottal * 0.32
+        elif spec.kind == "fricative":
+            excitation += noise * max(spec.noise, 0.16) * (1.25 + brightness * 0.35)
+            if spec.voiced:
+                excitation += glottal * 0.28
+        elif spec.kind == "nasal":
+            excitation = glottal * 0.58 + noise * grit * 0.015
+        elif spec.kind in {"liquid", "glide"}:
+            excitation = glottal * 0.72 + noise * (0.015 + grit * 0.018)
+        else:
+            excitation = glottal * 0.9 + noise * (0.018 + grit * 0.026)
+
+        sample = _vocal_tract_filter(excitation, spec, state, pos, brightness, warmth)
+        if spec.kind in {"fricative", "affricate"}:
+            sample += excitation * (0.22 + brightness * 0.1)
+        samples.append(clamp(sample * env * energy * 0.86))
+    state.previous_formants = spec.formants
+    return samples
 
 
 def _crossfade_append(target: SampleBuffer, incoming: SampleBuffer, fade: int = 96) -> None:
@@ -499,16 +608,26 @@ def _finish_word(word: str | None, start: float | None, end: float, cues: list[d
     return None, None
 
 
+def _calibrated_voice_settings(voice: dict[str, Any]) -> tuple[float, float, float, float, float]:
+    raw_base = float(voice.get("base_frequency", 170.0))
+    raw_pace = float(voice.get("pace", 1.0))
+    raw_brightness = float(voice.get("brightness", 0.5))
+    raw_grit = float(voice.get("grit", 0.12))
+    raw_warmth = float(voice.get("warmth", 0.45))
+    base = CLEAR_BASE_FREQUENCY + clamp((raw_base - 170.0) * 0.12, -11.0, 11.0)
+    pace = 1.0 + clamp((raw_pace - 1.0) * 0.24, -0.09, 0.09)
+    brightness = 0.5 + clamp((raw_brightness - 0.5) * 0.16, -0.08, 0.08)
+    grit = 0.045 + clamp(raw_grit, 0.0, 1.0) * 0.035
+    warmth = 0.62 + clamp((raw_warmth - 0.5) * 0.14, -0.08, 0.08)
+    return base, pace, brightness, grit, warmth
+
+
 def synthesize_text(
     text: str,
     voice: dict[str, Any],
     emotion: str = "steady",
 ) -> tuple[SampleBuffer, list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
-    base = float(voice.get("base_frequency", 170.0))
-    pace = float(voice.get("pace", 1.0))
-    brightness = 0.2 + clamp(float(voice.get("brightness", 0.5)), 0.0, 1.0) * 0.62
-    grit = clamp(float(voice.get("grit", 0.12)), 0.0, 1.0) * 0.22
-    warmth = clamp(float(voice.get("warmth", 0.35)), 0.0, 1.0)
+    base, pace, brightness, grit, warmth = _calibrated_voice_settings(voice)
     base, pace, brightness, grit, energy, pitch_swing = _emotion_settings(emotion, base, pace, brightness, grit)
     units = text_to_speech_units(text)
     spoken_units = [unit for unit in units if unit.symbol != "sil"]
@@ -521,7 +640,7 @@ def synthesize_text(
     current_word: str | None = None
     word_start: float | None = None
     t = 0.0
-    phase = 0.0
+    state = SourceFilterState()
     spoken_index = 0
     for unit in units:
         start = t
@@ -544,10 +663,10 @@ def synthesize_text(
         pitch_target = pitch_swing * math.sin(phrase_pos * math.pi * 1.35) - phrase_pos * 0.055
         if unit.stress > 1:
             pitch_target += 0.025
-        rendered, phase = _render_phoneme(
+        rendered = _render_phoneme(
             spec,
             count,
-            phase,
+            state,
             base,
             pitch_target,
             brightness,

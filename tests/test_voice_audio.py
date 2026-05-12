@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import tempfile
 import unittest
 import wave
@@ -11,6 +12,7 @@ from puppet_forge.prompting import make_performance
 from puppet_forge.voice import (
     AUDIO_ENGINE_VERSION,
     SAMPLE_RATE,
+    ResonatorState,
     audio_track_is_current,
     g2p_word,
     normalize_text,
@@ -18,7 +20,20 @@ from puppet_forge.voice import (
     synthesize_performance,
     synthesize_text,
     text_to_speech_units,
+    _glottal_source,
+    _resonator_coefficients,
+    _resonator_step,
 )
+
+
+def _frequency_energy(samples: list[float], frequency: float) -> float:
+    cosine = 0.0
+    sine = 0.0
+    for index, sample in enumerate(samples):
+        angle = 2.0 * math.pi * frequency * index / SAMPLE_RATE
+        cosine += sample * math.cos(angle)
+        sine += sample * math.sin(angle)
+    return math.sqrt(cosine * cosine + sine * sine) / max(1, len(samples))
 
 
 class VoiceAudioTests(unittest.TestCase):
@@ -67,6 +82,30 @@ class VoiceAudioTests(unittest.TestCase):
         self.assertLessEqual(max(abs(sample) for sample in samples), 1.0)
         self.assertGreater(rms(samples), 0.02)
         self.assertTrue(any(unit in {"ee", "oh", "ae"} for unit in phoneme_units("hello local stage")))
+
+    def test_source_filter_primitives_are_stable_and_deterministic(self) -> None:
+        coeffs = _resonator_coefficients(640.0, 120.0)
+        self.assertTrue(all(math.isfinite(value) for value in coeffs))
+        glottal = [_glottal_source(index / 64.0) for index in range(64)]
+        self.assertGreater(max(glottal) - min(glottal), 0.8)
+        self.assertTrue(all(math.isfinite(value) for value in glottal))
+
+        first_state = ResonatorState()
+        second_state = ResonatorState()
+        first = [_resonator_step(_glottal_source((index * 0.011) % 1.0), first_state, 640.0, 120.0) for index in range(500)]
+        second = [_resonator_step(_glottal_source((index * 0.011) % 1.0), second_state, 640.0, 120.0) for index in range(500)]
+        self.assertEqual(first, second)
+        self.assertTrue(all(math.isfinite(value) for value in first))
+        self.assertLessEqual(max(abs(value) for value in first), 8.0)
+
+    def test_voiced_vowels_have_broader_energy_than_a_single_beep(self) -> None:
+        samples, _, _, _ = synthesize_text("aaaa eeee oooo", DEFAULT_CHARACTERS[0].voice.to_dict())
+        window = samples[int(0.2 * SAMPLE_RATE) : int(0.2 * SAMPLE_RATE) + 4096]
+        bands = [155, 310, 465, 620, 775, 930, 1240, 1550, 1860, 2400, 3000]
+        energies = [_frequency_energy(window, band) for band in bands]
+        top = max(energies)
+        self.assertLess(top / sum(energies), 0.48)
+        self.assertGreaterEqual(sum(1 for energy in energies if energy > top * 0.15), 3)
 
     def test_word_timing_punctuation_and_emotion_are_deterministic(self) -> None:
         voice = DEFAULT_CHARACTERS[0].voice.to_dict()
@@ -117,6 +156,9 @@ class VoiceAudioTests(unittest.TestCase):
             old_track = track.to_dict()
             old_track.pop("engine_version")
             self.assertFalse(audio_track_is_current(old_track))
+            stale_track = track.to_dict()
+            stale_track["engine_version"] = "puppetvoice-0.4"
+            self.assertFalse(audio_track_is_current(stale_track))
             self.assertLess(track.line_cues[0]["start"], track.line_cues[0]["end"])
             with wave.open(track.wav_path, "rb") as wf:
                 self.assertEqual(wf.getframerate(), SAMPLE_RATE)
