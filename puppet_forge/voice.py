@@ -3,63 +3,224 @@ from __future__ import annotations
 import math
 import re
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .audio import SampleBuffer, duration_seconds, master_voice, write_wav
+from .audio import SampleBuffer, clamp, duration_seconds, master_voice, normalize, write_wav
 from .models import AudioTrack
 
 
 SAMPLE_RATE = 22050
-VOWELS = set("aeiouy")
+MAX_HARMONIC = 14
+WORD_RE = re.compile(r"[a-z0-9]+(?:'[a-z0-9]+)?|[.,!?;:-]")
 PUNCTUATION_PAUSES = {
-    ",": 0.115,
-    ";": 0.135,
-    ":": 0.13,
-    ".": 0.185,
-    "!": 0.215,
-    "?": 0.225,
-    "-": 0.075,
+    ",": 0.12,
+    ";": 0.17,
+    ":": 0.16,
+    ".": 0.24,
+    "!": 0.27,
+    "?": 0.28,
+    "-": 0.08,
 }
 
 
-def viseme_for(token: str) -> str:
-    token = token.lower()
-    if token in {"o", "u", "w"}:
-        return "round"
-    if token in {"a", "h"}:
-        return "open"
-    if token in {"e", "i", "y"}:
-        return "wide"
-    if token in {"f", "v", "s", "z", "t", "d", "n", "l"}:
-        return "teeth"
-    if token in {"m", "b", "p"}:
-        return "closed"
-    return "rest"
+@dataclass(frozen=True)
+class PhonemeSpec:
+    symbol: str
+    kind: str
+    viseme: str
+    duration: float
+    voiced: bool = False
+    formants: tuple[float, float, float] = (500.0, 1500.0, 2500.0)
+    amplitudes: tuple[float, float, float] = (1.0, 0.45, 0.2)
+    noise: float = 0.0
+    burst: float = 0.0
 
 
-def phoneme_units(text: str) -> list[str]:
-    cleaned = re.sub(r"\s+", " ", text.strip())
-    units: list[str] = []
-    for char in cleaned:
-        if char == " ":
-            units.append(" ")
-        elif char.isalnum() or char in ".,!?;:-'":
-            units.append(char.lower())
+@dataclass(frozen=True)
+class SpeechUnit:
+    symbol: str
+    word: str | None = None
+    punctuation: str | None = None
+    stress: float = 1.0
+
+
+VOWEL_FORMANTS: dict[str, tuple[tuple[float, float, float], tuple[float, float, float], str]] = {
+    "aa": ((760, 1180, 2600), (1.0, 0.48, 0.24), "open"),
+    "ae": ((680, 1720, 2410), (1.0, 0.52, 0.24), "open"),
+    "ah": ((640, 1250, 2550), (1.0, 0.46, 0.2), "open"),
+    "aw": ((520, 900, 2400), (1.0, 0.5, 0.22), "round"),
+    "ay": ((560, 1800, 2550), (1.0, 0.5, 0.2), "wide"),
+    "eh": ((530, 1840, 2480), (1.0, 0.55, 0.24), "wide"),
+    "ee": ((300, 2250, 3000), (1.0, 0.58, 0.28), "wide"),
+    "ih": ((390, 1990, 2550), (1.0, 0.5, 0.22), "wide"),
+    "oh": ((500, 900, 2600), (1.0, 0.48, 0.2), "round"),
+    "oo": ((350, 760, 2400), (1.0, 0.44, 0.18), "round"),
+    "uh": ((450, 1100, 2400), (1.0, 0.42, 0.18), "round"),
+    "er": ((460, 1300, 1700), (1.0, 0.55, 0.28), "teeth"),
+}
+
+
+CONSONANTS: dict[str, PhonemeSpec] = {
+    "b": PhonemeSpec("b", "stop", "closed", 0.065, voiced=True, formants=(220, 900, 2100), amplitudes=(0.5, 0.16, 0.08), burst=0.28),
+    "ch": PhonemeSpec("ch", "affricate", "teeth", 0.105, noise=0.35, burst=0.32),
+    "d": PhonemeSpec("d", "stop", "teeth", 0.06, voiced=True, formants=(260, 1600, 2600), amplitudes=(0.42, 0.18, 0.09), burst=0.26),
+    "f": PhonemeSpec("f", "fricative", "teeth", 0.09, noise=0.22),
+    "g": PhonemeSpec("g", "stop", "rest", 0.07, voiced=True, formants=(260, 1200, 2300), amplitudes=(0.45, 0.15, 0.08), burst=0.22),
+    "h": PhonemeSpec("h", "fricative", "open", 0.065, noise=0.14),
+    "j": PhonemeSpec("j", "affricate", "wide", 0.095, voiced=True, formants=(260, 1850, 2700), amplitudes=(0.45, 0.22, 0.11), noise=0.16, burst=0.2),
+    "k": PhonemeSpec("k", "stop", "rest", 0.075, noise=0.08, burst=0.34),
+    "l": PhonemeSpec("l", "liquid", "teeth", 0.075, voiced=True, formants=(360, 1200, 2600), amplitudes=(0.8, 0.3, 0.12)),
+    "m": PhonemeSpec("m", "nasal", "closed", 0.08, voiced=True, formants=(250, 1050, 2200), amplitudes=(0.75, 0.18, 0.08)),
+    "n": PhonemeSpec("n", "nasal", "teeth", 0.07, voiced=True, formants=(290, 1300, 2400), amplitudes=(0.68, 0.2, 0.08)),
+    "ng": PhonemeSpec("ng", "nasal", "rest", 0.085, voiced=True, formants=(280, 1500, 2500), amplitudes=(0.65, 0.18, 0.08)),
+    "p": PhonemeSpec("p", "stop", "closed", 0.07, burst=0.36),
+    "r": PhonemeSpec("r", "liquid", "teeth", 0.08, voiced=True, formants=(360, 1150, 1750), amplitudes=(0.8, 0.34, 0.16)),
+    "s": PhonemeSpec("s", "fricative", "teeth", 0.085, noise=0.3),
+    "sh": PhonemeSpec("sh", "fricative", "round", 0.095, noise=0.32),
+    "t": PhonemeSpec("t", "stop", "teeth", 0.065, burst=0.36),
+    "th": PhonemeSpec("th", "fricative", "teeth", 0.09, noise=0.22),
+    "dh": PhonemeSpec("dh", "fricative", "teeth", 0.075, voiced=True, formants=(260, 1500, 2500), amplitudes=(0.42, 0.18, 0.08), noise=0.1),
+    "v": PhonemeSpec("v", "fricative", "teeth", 0.08, voiced=True, formants=(230, 1350, 2400), amplitudes=(0.44, 0.16, 0.08), noise=0.16),
+    "w": PhonemeSpec("w", "glide", "round", 0.075, voiced=True, formants=(300, 760, 2400), amplitudes=(0.78, 0.3, 0.12)),
+    "y": PhonemeSpec("y", "glide", "wide", 0.07, voiced=True, formants=(300, 2200, 3000), amplitudes=(0.76, 0.38, 0.16)),
+    "z": PhonemeSpec("z", "fricative", "teeth", 0.08, voiced=True, formants=(250, 1500, 2600), amplitudes=(0.42, 0.18, 0.1), noise=0.2),
+    "zh": PhonemeSpec("zh", "fricative", "round", 0.09, voiced=True, formants=(250, 1650, 2550), amplitudes=(0.42, 0.18, 0.1), noise=0.2),
+}
+
+
+def phoneme_spec(symbol: str) -> PhonemeSpec:
+    if symbol in VOWEL_FORMANTS:
+        formants, amplitudes, viseme = VOWEL_FORMANTS[symbol]
+        return PhonemeSpec(symbol, "vowel", viseme, 0.115, voiced=True, formants=formants, amplitudes=amplitudes)
+    return CONSONANTS.get(symbol, PhonemeSpec(symbol, "liquid", "rest", 0.055, voiced=True))
+
+
+def normalize_text(text: str) -> str:
+    text = text.lower()
+    text = text.replace("’", "'").replace("“", '"').replace("”", '"')
+    text = text.replace("&", " and ")
+    text = re.sub(r"\([^)]*\)", " ", text)
+    text = re.sub(r"[^a-z0-9'.,!?;:\-\s]", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def tokenize_text(text: str) -> list[str]:
+    return WORD_RE.findall(normalize_text(text))
+
+
+def _vowel_for_single(word: str, index: int) -> str:
+    char = word[index]
+    if char == "a":
+        if index + 1 == len(word):
+            return "ah"
+        return "ae"
+    if char == "e":
+        return "eh" if index + 1 < len(word) else "ee"
+    if char == "i":
+        return "ih"
+    if char == "o":
+        return "oh"
+    if char == "u":
+        return "uh"
+    if char == "y":
+        return "ee" if index + 1 == len(word) else "ih"
+    return "ah"
+
+
+def g2p_word(word: str) -> list[str]:
+    word = normalize_text(word).strip(".,!?;:- ")
+    if not word:
+        return []
+    if word.endswith("'s"):
+        word = word[:-2] + "z"
+    groups = [
+        ("tion", ["sh", "ah", "n"]),
+        ("sion", ["zh", "ah", "n"]),
+        ("ough", ["oh"]),
+        ("igh", ["ay"]),
+        ("air", ["eh", "r"]),
+        ("ear", ["ee", "r"]),
+        ("er", ["er"]),
+        ("ar", ["aa", "r"]),
+        ("or", ["oh", "r"]),
+        ("ee", ["ee"]),
+        ("ea", ["ee"]),
+        ("oo", ["oo"]),
+        ("ou", ["aw"]),
+        ("ow", ["aw"]),
+        ("ai", ["ay"]),
+        ("ay", ["ay"]),
+        ("oa", ["oh"]),
+        ("oy", ["oh", "ee"]),
+        ("oi", ["oh", "ee"]),
+        ("ch", ["ch"]),
+        ("sh", ["sh"]),
+        ("ng", ["ng"]),
+        ("ph", ["f"]),
+        ("wh", ["w"]),
+        ("qu", ["k", "w"]),
+        ("ck", ["k"]),
+        ("th", ["dh"] if word in {"the", "this", "that", "these", "those", "then", "there", "they", "them"} else ["th"]),
+    ]
+    out: list[str] = []
+    index = 0
+    while index < len(word):
+        match = None
+        for text, phones in groups:
+            if word.startswith(text, index):
+                match = (text, phones)
+                break
+        if match:
+            text, phones = match
+            out.extend(phones)
+            index += len(text)
+            continue
+        char = word[index]
+        next_char = word[index + 1] if index + 1 < len(word) else ""
+        if char in "aeiouy":
+            out.append(_vowel_for_single(word, index))
+        elif char == "c":
+            out.append("s" if next_char in "eiy" else "k")
+        elif char == "g":
+            out.append("j" if next_char in "eiy" else "g")
+        elif char == "x":
+            out.extend(["k", "s"])
+        elif char in "bcdfhjklmnpqrstvwyz":
+            out.append(char)
+        index += 1
+    if len(out) > 2 and out[-1] == "ee" and word.endswith("e") and out[-2] not in {"l", "r"}:
+        out.pop()
+    return out
+
+
+def text_to_speech_units(text: str) -> list[SpeechUnit]:
+    units: list[SpeechUnit] = []
+    for token in tokenize_text(text):
+        if token in PUNCTUATION_PAUSES:
+            units.append(SpeechUnit("sil", punctuation=token))
+            continue
+        phones = g2p_word(token)
+        vowel_seen = False
+        for phone in phones:
+            spec = phoneme_spec(phone)
+            stress = 1.12 if spec.kind == "vowel" and not vowel_seen and len(token) > 3 else 1.0
+            if spec.kind == "vowel":
+                vowel_seen = True
+            units.append(SpeechUnit(phone, word=token, stress=stress))
+        units.append(SpeechUnit("sil", punctuation=" "))
+    if units and units[-1].symbol == "sil" and units[-1].punctuation == " ":
+        units.pop()
     return units
 
 
-def _char_duration(char: str, pace: float) -> float:
-    pace = max(0.35, pace)
-    if char == " ":
-        return 0.055 / pace
-    if char in PUNCTUATION_PAUSES:
-        return PUNCTUATION_PAUSES[char] / pace
-    if char in VOWELS:
-        return 0.078 / pace
-    if char.isdigit():
-        return 0.062 / pace
-    return 0.047 / pace
+def viseme_for(token: str) -> str:
+    return phoneme_spec(token).viseme
+
+
+def phoneme_units(text: str) -> list[str]:
+    return [unit.symbol if unit.symbol != "sil" else " " for unit in text_to_speech_units(text)]
 
 
 def _noise(index: int) -> float:
@@ -76,42 +237,158 @@ def _emotion_settings(
 ) -> tuple[float, float, float, float, float, float]:
     emotion = (emotion or "steady").lower()
     energy = 1.0
-    vibrato = 0.012
+    pitch_swing = 0.045
     if emotion == "bright":
         base *= 1.08
-        brightness = min(1.0, brightness + 0.14)
-        energy = 1.08
-        vibrato = 0.018
+        brightness = min(1.0, brightness + 0.12)
+        energy = 1.06
+        pitch_swing = 0.06
     elif emotion == "careful":
-        base *= 0.93
-        pace *= 0.84
-        energy = 0.82
-        vibrato = 0.006
+        base *= 0.94
+        pace *= 0.86
+        energy = 0.9
+        pitch_swing = 0.025
     elif emotion == "playful":
         base *= 1.12
-        pace *= 1.12
+        pace *= 1.1
         brightness = min(1.0, brightness + 0.1)
-        energy = 1.12
-        vibrato = 0.028
+        energy = 1.08
+        pitch_swing = 0.075
     elif emotion == "curious":
-        base *= 1.04
-        pace *= 0.98
-        vibrato = 0.02
+        base *= 1.03
+        pace *= 0.96
+        pitch_swing = 0.065
     elif emotion == "bold":
         base *= 0.98
-        grit = min(1.0, grit + 0.08)
-        energy = 1.18
+        grit = min(1.0, grit + 0.05)
+        energy = 1.12
     elif emotion == "gentle":
         base *= 0.96
-        pace *= 0.92
-        energy = 0.88
-    return base, pace, brightness, grit, energy, vibrato
+        pace *= 0.9
+        energy = 0.86
+        pitch_swing = 0.03
+    return base, pace, brightness, grit, energy, pitch_swing
 
 
-def _finish_word(word: list[str], start: float | None, end: float, cues: list[dict[str, Any]]) -> tuple[list[str], None]:
+def _pause_duration(punctuation: str | None, pace: float) -> float:
+    if punctuation == " ":
+        return 0.052 / pace
+    return PUNCTUATION_PAUSES.get(punctuation or "", 0.07) / pace
+
+
+def _phoneme_duration(spec: PhonemeSpec, pace: float, stress: float) -> float:
+    duration = spec.duration * stress
+    if spec.kind == "vowel":
+        duration *= 1.18
+    elif spec.kind in {"stop", "affricate"}:
+        duration *= 0.9
+    return duration / max(0.35, pace)
+
+
+def _formant_weight(freq: float, formants: tuple[float, float, float], amplitudes: tuple[float, float, float], brightness: float) -> float:
+    weight = 0.0
+    bandwidths = (120.0, 190.0, 280.0)
+    for formant, amp, bandwidth in zip(formants, amplitudes, bandwidths):
+        weight += amp * math.exp(-((freq - formant) ** 2) / (2.0 * bandwidth * bandwidth))
+    tilt = 1.0 / (1.0 + (freq / (1850.0 + brightness * 900.0)) ** 1.45)
+    return weight * (0.34 + brightness * 0.36 + tilt)
+
+
+def _voiced_weights(freq: float, spec: PhonemeSpec, brightness: float) -> tuple[list[tuple[int, float]], float]:
+    weights: list[tuple[int, float]] = []
+    norm = 0.0
+    for harmonic in range(1, MAX_HARMONIC + 1):
+        harmonic_freq = freq * harmonic
+        if harmonic_freq > 4200:
+            break
+        weight = _formant_weight(harmonic_freq, spec.formants, spec.amplitudes, brightness) / harmonic
+        weights.append((harmonic, weight))
+        norm += abs(weight)
+    return weights, max(0.12, norm)
+
+
+def _voiced_sample(
+    sample_index: int,
+    phase: float,
+    weights: list[tuple[int, float]],
+    norm: float,
+    warmth: float,
+    grit: float,
+) -> float:
+    total = 0.0
+    for harmonic, weight in weights:
+        total += math.sin(phase * harmonic) * weight
+    breath = _noise(sample_index) * grit * 0.018
+    warm = math.sin(phase * 0.5) * warmth * 0.045
+    return (total / norm) * 0.58 + warm + breath
+
+
+def _filtered_noise(sample_index: int, spec: PhonemeSpec, brightness: float) -> float:
+    raw = _noise(sample_index)
+    raw2 = _noise(sample_index + 17)
+    rough = raw - raw2 * (0.55 - brightness * 0.25)
+    if spec.symbol in {"s", "z", "sh", "zh", "ch"}:
+        rough *= 1.22
+    if spec.symbol in {"f", "v", "th", "dh"}:
+        rough *= 0.78
+    return rough * spec.noise
+
+
+def _envelope(pos: float, kind: str) -> float:
+    if kind == "stop":
+        return min(1.0, pos * 18.0, (1.0 - pos) * 6.0)
+    if kind in {"fricative", "affricate"}:
+        return min(1.0, pos * 8.0, (1.0 - pos) * 7.0)
+    return min(1.0, pos * 10.0, (1.0 - pos) * 8.0)
+
+
+def _render_phoneme(
+    spec: PhonemeSpec,
+    count: int,
+    phase: float,
+    base_freq: float,
+    pitch_target: float,
+    brightness: float,
+    warmth: float,
+    grit: float,
+    energy: float,
+    sample_offset: int,
+) -> tuple[SampleBuffer, float]:
+    samples: SampleBuffer = []
+    burst_count = max(1, int(0.018 * SAMPLE_RATE))
+    nominal_freq = base_freq * (1.0 + pitch_target)
+    weights, norm = _voiced_weights(nominal_freq, spec, brightness) if spec.voiced else ([], 1.0)
+    for n in range(count):
+        pos = n / max(1, count - 1)
+        freq = nominal_freq * (1.0 + math.sin((sample_offset + n) / SAMPLE_RATE * 6.0) * 0.006)
+        phase += 2.0 * math.pi * freq / SAMPLE_RATE
+        env = _envelope(pos, spec.kind)
+        sample = 0.0
+        if spec.voiced:
+            sample = _voiced_sample(sample_offset + n, phase, weights, norm, warmth, grit)
+        if spec.noise:
+            sample += _filtered_noise(sample_offset + n, spec, brightness) * (0.7 if spec.voiced else 1.0)
+        if spec.burst and n < burst_count:
+            sample += _noise(sample_offset + n + 101) * spec.burst * (1.0 - n / burst_count)
+        samples.append(clamp(sample * env * energy * 0.62))
+    return samples, phase
+
+
+def _crossfade_append(target: SampleBuffer, incoming: SampleBuffer, fade: int = 96) -> None:
+    if not target or not incoming:
+        target.extend(incoming)
+        return
+    size = min(fade, len(target), len(incoming))
+    for i in range(size):
+        ratio = (i + 1) / (size + 1)
+        target[-size + i] = target[-size + i] * (1.0 - ratio) + incoming[i] * ratio
+    target.extend(incoming[size:])
+
+
+def _finish_word(word: str | None, start: float | None, end: float, cues: list[dict[str, Any]]) -> tuple[None, None]:
     if word and start is not None:
-        cues.append({"word": "".join(word), "start": round(start, 3), "end": round(max(start, end), 3)})
-    return [], None
+        cues.append({"word": word, "start": round(start, 3), "end": round(max(start, end), 3)})
+    return None, None
 
 
 def synthesize_text(
@@ -122,56 +399,63 @@ def synthesize_text(
     base = float(voice.get("base_frequency", 170.0))
     pace = float(voice.get("pace", 1.0))
     brightness = float(voice.get("brightness", 0.5))
-    grit = float(voice.get("grit", 0.15))
+    grit = min(0.42, float(voice.get("grit", 0.12)))
     warmth = float(voice.get("warmth", 0.35))
-    base, pace, brightness, grit, energy, vibrato = _emotion_settings(emotion, base, pace, brightness, grit)
+    base, pace, brightness, grit, energy, pitch_swing = _emotion_settings(emotion, base, pace, brightness, grit)
+    units = text_to_speech_units(text)
+    spoken_units = [unit for unit in units if unit.symbol != "sil"]
+    total_spoken = max(1, len(spoken_units))
 
     samples: SampleBuffer = []
     visemes: list[dict[str, Any]] = []
     word_cues: list[dict[str, Any]] = []
-    current_word: list[str] = []
+    current_word: str | None = None
     word_start: float | None = None
     t = 0.0
     phase = 0.0
-    units = phoneme_units(text)
-    for idx, unit in enumerate(units):
+    spoken_index = 0
+    for unit in units:
         start = t
-        if unit.isalnum() or unit == "'":
-            if word_start is None:
-                word_start = start
-            current_word.append(unit)
-        else:
+        if unit.symbol == "sil":
             current_word, word_start = _finish_word(current_word, word_start, start, word_cues)
+            count = max(1, int(_pause_duration(unit.punctuation, pace) * SAMPLE_RATE))
+            _crossfade_append(samples, [0.0] * count, fade=24)
+            t += count / SAMPLE_RATE
+            continue
 
-        dur = _char_duration(unit, pace)
+        if current_word != unit.word:
+            current_word, word_start = _finish_word(current_word, word_start, start, word_cues)
+            current_word = unit.word
+            word_start = start
+
+        spec = phoneme_spec(unit.symbol)
+        dur = _phoneme_duration(spec, pace, unit.stress)
         count = max(1, int(dur * SAMPLE_RATE))
-        viseme = viseme_for(unit)
-        if unit == " " or unit in PUNCTUATION_PAUSES:
-            samples.extend([0.0] * count)
-        else:
-            freq = base * (1.0 + ((ord(unit[0]) % 7) - 3) * 0.027)
-            if unit in VOWELS:
-                freq *= {"a": 0.92, "e": 1.1, "i": 1.18, "o": 0.84, "u": 0.78, "y": 1.15}.get(unit, 1.0)
-            amp = (0.25 if unit in VOWELS else 0.12) * energy
-            for n in range(count):
-                pos = n / count
-                env = min(1.0, pos * 10.0, (1.0 - pos) * 8.0)
-                now = t + n / SAMPLE_RATE
-                wobble = 1.0 + math.sin(now * 8.0 + idx * 0.37) * vibrato
-                phrase_lift = 1.0 + math.sin((idx + 1) * 0.71) * 0.018
-                phase += 2.0 * math.pi * freq * wobble * phrase_lift / SAMPLE_RATE
-                tone = math.sin(phase)
-                harmonic = math.sin(phase * 2.0 + brightness) * brightness * 0.34
-                breath = math.sin(phase * 0.5) * warmth * 0.045
-                fricative = _noise(len(samples) + n + idx) * grit * (0.15 if unit not in VOWELS else 0.035)
-                samples.append((tone + harmonic + breath + fricative) * amp * env)
+        phrase_pos = spoken_index / total_spoken
+        pitch_target = pitch_swing * math.sin(phrase_pos * math.pi * 1.35) - phrase_pos * 0.055
+        if unit.stress > 1:
+            pitch_target += 0.025
+        rendered, phase = _render_phoneme(
+            spec,
+            count,
+            phase,
+            base,
+            pitch_target,
+            brightness,
+            warmth,
+            grit,
+            energy,
+            len(samples),
+        )
+        _crossfade_append(samples, rendered)
         end = start + count / SAMPLE_RATE
-        if viseme != "rest":
-            visemes.append({"start": round(start, 3), "end": round(end, 3), "viseme": viseme, "token": unit})
+        if spec.viseme != "rest":
+            visemes.append({"start": round(start, 3), "end": round(end, 3), "viseme": spec.viseme, "token": unit.symbol})
         t = end
+        spoken_index += 1
     _finish_word(current_word, word_start, t, word_cues)
-    mastered = master_voice(samples, warmth_amount=warmth)
-    return mastered, visemes, word_cues
+    mastered = master_voice(samples, warmth_amount=warmth * 0.45, cleanup=False)
+    return normalize(mastered, target=0.86), visemes, word_cues
 
 
 def synthesize_performance(
@@ -200,6 +484,7 @@ def synthesize_performance(
             shifted["character_name"] = character["name"]
             shifted["line_index"] = index
             all_visemes.append(shifted)
+        line_word_count = 0
         for cue in word_cues:
             shifted_word = dict(cue)
             shifted_word["start"] = round(shifted_word["start"] + cursor, 3)
@@ -208,8 +493,9 @@ def synthesize_performance(
             shifted_word["character_id"] = character["id"]
             shifted_word["character_name"] = character["name"]
             all_word_cues.append(shifted_word)
+            line_word_count += 1
         all_samples.extend(samples)
-        pause = int(0.22 * SAMPLE_RATE)
+        pause = int(0.2 * SAMPLE_RATE)
         all_samples.extend([0.0] * pause)
         line_end = cursor + len(samples) / SAMPLE_RATE
         line_cues.append(
@@ -221,7 +507,7 @@ def synthesize_performance(
                 "character_name": character["name"],
                 "emotion": line.get("emotion", "steady"),
                 "text": line.get("text", ""),
-                "word_count": sum(1 for cue in all_word_cues if cue["line_index"] == index),
+                "word_count": line_word_count,
             }
         )
         cursor = line_end + pause / SAMPLE_RATE

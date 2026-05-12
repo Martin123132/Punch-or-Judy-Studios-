@@ -8,15 +8,37 @@ from pathlib import Path
 from puppet_forge.audio import master_voice, normalize, pgf_process
 from puppet_forge.defaults import DEFAULT_CHARACTERS, DEFAULT_SCENES
 from puppet_forge.prompting import make_performance
-from puppet_forge.voice import SAMPLE_RATE, synthesize_performance, synthesize_text
+from puppet_forge.voice import (
+    SAMPLE_RATE,
+    g2p_word,
+    normalize_text,
+    phoneme_units,
+    synthesize_performance,
+    synthesize_text,
+    text_to_speech_units,
+)
 
 
 class VoiceAudioTests(unittest.TestCase):
+    def test_normalize_text_and_g2p_handle_common_speech_rules(self) -> None:
+        self.assertEqual(normalize_text("Hello—LOCAL & stage!"), "hello local and stage!")
+        self.assertEqual(g2p_word("show"), ["sh", "aw"])
+        self.assertEqual(g2p_word("thing")[:2], ["th", "ih"])
+        self.assertIn("ng", g2p_word("thing"))
+        self.assertEqual(g2p_word("voice")[-1], "s")
+        units = text_to_speech_units("the puppet voice is clear now")
+        symbols = [unit.symbol for unit in units if unit.symbol != "sil"]
+        self.assertIn("dh", symbols)
+        self.assertIn("p", symbols)
+        self.assertIn("k", symbols)
+
     def test_synthesize_text_creates_samples_and_visemes(self) -> None:
         samples, visemes, word_cues = synthesize_text("Hello local stage!", DEFAULT_CHARACTERS[0].voice.to_dict())
         self.assertGreater(len(samples), SAMPLE_RATE // 2)
         self.assertTrue(any(event["viseme"] in {"open", "wide", "round"} for event in visemes))
         self.assertEqual([cue["word"] for cue in word_cues], ["hello", "local", "stage"])
+        self.assertLessEqual(max(abs(sample) for sample in samples), 1.0)
+        self.assertTrue(any(unit in {"ee", "oh", "ae"} for unit in phoneme_units("hello local stage")))
 
     def test_word_timing_punctuation_and_emotion_are_deterministic(self) -> None:
         voice = DEFAULT_CHARACTERS[0].voice.to_dict()
@@ -28,6 +50,9 @@ class VoiceAudioTests(unittest.TestCase):
         self.assertGreater(len(careful), len(playful))
         self.assertEqual(plain_words, synthesize_text("Hello local stage", voice, "steady")[2])
         self.assertEqual([cue["word"] for cue in punctuated_words], ["hello", "local", "stage"])
+        seconds = len(plain) / SAMPLE_RATE
+        self.assertGreater(seconds, 1.0)
+        self.assertLess(seconds, 4.0)
 
     def test_pgf_mastering_keeps_samples_normalized(self) -> None:
         raw = [0.0, 1.8, -1.7, 0.2, -0.1, 0.0] * 20
