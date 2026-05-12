@@ -15,10 +15,11 @@ from puppet_forge.voice import AUDIO_ENGINE_VERSION, SAMPLE_RATE, synthesize_tex
 
 
 PHRASE_SETS = {
-    "v0.5-clear": [
-        "hello local stage",
-        "sound first, motion second",
+    "v0.6-clear-core": [
         "the puppet voice is clear now",
+        "the voice is clear",
+        "puppet voice now",
+        "hello local stage",
         "this local voice does not need a cloud key",
     ]
 }
@@ -34,7 +35,7 @@ def _metrics(samples: list[float]) -> dict[str, float]:
 
 
 def main() -> None:
-    phrase_set = "v0.5-clear"
+    phrase_set = "v0.6-clear-core"
     phrases = PHRASE_SETS[phrase_set]
     out_dir = outputs_dir() / "voice-auditions" / phrase_set
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -57,6 +58,10 @@ def main() -> None:
                     "phrase": phrase,
                     "wav_path": str(wav_path),
                     **_metrics(samples),
+                    "word_sources": [
+                        {"word": cue["word"], "render_source": cue.get("render_source", "unknown")}
+                        for cue in word_cues
+                    ],
                     "phonemes": [cue["phoneme"] for cue in phoneme_cues],
                     "phoneme_cues": phoneme_cues,
                     "viseme_count": len(visemes),
