@@ -1,6 +1,6 @@
 [project]
 name = "punch-or-judy-studios"
-version = "0.7.0"
+version = "0.8.0"
 description = "Local-first AI puppet show studio with original characters, local voice, puppet rendering, and optional AI providers."
 readme = "README.md"
 requires-python = ">=3.10"

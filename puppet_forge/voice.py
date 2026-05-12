@@ -12,17 +12,17 @@ from .models import AudioTrack
 
 
 SAMPLE_RATE = 22050
-AUDIO_ENGINE_VERSION = "puppetvoice-0.7"
+AUDIO_ENGINE_VERSION = "puppetvoice-0.8"
 CLEAR_BASE_FREQUENCY = 158.0
 WORD_RE = re.compile(r"[a-z0-9]+(?:'[a-z0-9]+)?|[.,!?;:-]")
 PUNCTUATION_PAUSES = {
-    ",": 0.12,
-    ";": 0.17,
-    ":": 0.16,
-    ".": 0.24,
-    "!": 0.27,
-    "?": 0.28,
-    "-": 0.08,
+    ",": 0.16,
+    ";": 0.2,
+    ":": 0.19,
+    ".": 0.28,
+    "!": 0.31,
+    "?": 0.32,
+    "-": 0.105,
 }
 
 
@@ -231,6 +231,20 @@ UNIT_BANK: dict[str, tuple[UnitGesture, ...]] = {
     ),
 }
 UNIT_BANK_WORDS = frozenset(UNIT_BANK)
+
+STRESSED_UNIT_WORDS: dict[str, float] = {
+    "puppet": 1.15,
+    "voice": 1.13,
+    "clear": 1.16,
+    "hello": 1.13,
+    "stage": 1.14,
+    "sound": 1.12,
+    "motion": 1.13,
+}
+SOFT_FUNCTION_WORDS: dict[str, float] = {
+    "the": 0.64,
+    "is": 0.72,
+}
 
 
 VOWEL_FORMANTS: dict[str, tuple[tuple[float, float, float], tuple[float, float, float], str]] = {
@@ -497,6 +511,52 @@ def _pause_duration(punctuation: str | None, pace: float) -> float:
     return PUNCTUATION_PAUSES.get(punctuation or "", 0.07) / pace
 
 
+def _word_stress(word: str) -> float:
+    return SOFT_FUNCTION_WORDS.get(word, STRESSED_UNIT_WORDS.get(word, 1.0))
+
+
+def _stress_duration_scale(stress: float) -> float:
+    return clamp(1.0 + (stress - 1.0) * 0.16, 0.88, 1.05)
+
+
+def _phrase_position(word_index: int, word_count: int) -> float:
+    if word_count <= 1:
+        return 0.0
+    return clamp(word_index / max(1, word_count - 1), 0.0, 1.0)
+
+
+def _phrase_pitch_at(position: float, pitch_swing: float) -> float:
+    position = clamp(position, 0.0, 1.0)
+    rise = math.sin(position * math.pi)
+    settling_fall = position * 0.045
+    return pitch_swing * 0.86 * rise - settling_fall
+
+
+def _word_gap_duration(current_word: str, next_word: str, pace: float) -> float:
+    if current_word in UNIT_BANK and next_word in UNIT_BANK:
+        return 0.028 / pace
+    return _pause_duration(" ", pace)
+
+
+def _adjacent_unit_word(tokens: list[str], index: int, direction: int) -> bool:
+    neighbor_index = index + direction
+    if neighbor_index < 0 or neighbor_index >= len(tokens):
+        return False
+    current = tokens[index]
+    neighbor = tokens[neighbor_index]
+    return current in UNIT_BANK and neighbor in UNIT_BANK
+
+
+def _blend_state_toward_next_unit(state: SourceFilterState, next_word: str | None) -> None:
+    if not next_word or next_word not in UNIT_BANK:
+        return
+    first_spec = phoneme_spec(UNIT_BANK[next_word][0].symbol)
+    state.previous_formants = tuple(
+        current * 0.72 + upcoming * 0.28
+        for current, upcoming in zip(state.previous_formants, first_spec.formants)
+    )
+
+
 def _phoneme_duration(spec: PhonemeSpec, pace: float, stress: float) -> float:
     duration = spec.duration * stress
     if spec.kind == "vowel":
@@ -667,7 +727,12 @@ def _render_phoneme(
     nominal_freq = base_freq * (1.0 + pitch_target)
     for n in range(count):
         pos = n / max(1, count - 1)
-        freq = nominal_freq * (1.0 + math.sin((sample_offset + n) / SAMPLE_RATE * 6.0) * 0.006)
+        wander = 0.006 + (0.006 if spec.kind in {"vowel", "liquid", "glide", "nasal"} else 0.0)
+        freq = nominal_freq * (
+            1.0
+            + math.sin((sample_offset + n) / SAMPLE_RATE * 6.0) * wander
+            + math.sin((sample_offset + n) / SAMPLE_RATE * 17.0) * 0.002
+        )
         phase = _advance_glottis(state, freq)
         env = _unit_envelope(pos, spec.kind, first, last) if unit_mode else _envelope(pos, spec.kind)
         noise = _aspiration_noise(sample_offset + n, state, brightness)
@@ -697,7 +762,7 @@ def _render_phoneme(
         elif spec.kind in {"liquid", "glide"}:
             excitation = glottal * 0.72 + noise * (0.015 + grit * 0.018)
         else:
-            excitation = glottal * 0.9 + noise * (0.018 + grit * 0.026)
+            excitation = glottal * 0.86 + noise * (0.035 + brightness * 0.012 + grit * 0.024)
 
         sample = _vocal_tract_filter(excitation, spec, state, pos, brightness, warmth)
         if spec.kind in {"fricative", "affricate"}:
@@ -739,8 +804,8 @@ def _calibrated_voice_settings(voice: dict[str, Any]) -> tuple[float, float, flo
 
 
 def _phrase_pitch(spoken_index: int, total_spoken: int, pitch_swing: float) -> float:
-    phrase_pos = spoken_index / max(1, total_spoken)
-    return pitch_swing * math.sin(phrase_pos * math.pi * 1.35) - phrase_pos * 0.055
+    phrase_pos = spoken_index / max(1, total_spoken - 1)
+    return _phrase_pitch_at(phrase_pos, pitch_swing)
 
 
 def _render_fallback_word(
@@ -755,6 +820,8 @@ def _render_fallback_word(
     pitch_swing: float,
     spoken_index: int,
     total_spoken: int,
+    word_index: int,
+    word_count: int,
     sample_offset: int,
 ) -> tuple[SampleBuffer, list[dict[str, Any]], list[dict[str, Any]], int]:
     samples: SampleBuffer = []
@@ -762,13 +829,15 @@ def _render_fallback_word(
     phoneme_cues: list[dict[str, Any]] = []
     phones = g2p_word(word)
     vowel_seen = False
+    word_stress = _word_stress(word)
+    position = _phrase_position(word_index, word_count)
     for phone in phones:
         spec = phoneme_spec(phone)
-        stress = 1.12 if spec.kind == "vowel" and not vowel_seen and len(word) > 3 else 1.0
+        stress = word_stress * (1.1 if spec.kind == "vowel" and not vowel_seen and len(word) > 3 else 1.0)
         if spec.kind == "vowel":
             vowel_seen = True
         count = max(1, int(_phoneme_duration(spec, pace, stress) * SAMPLE_RATE))
-        pitch_target = _phrase_pitch(spoken_index, total_spoken, pitch_swing)
+        pitch_target = _phrase_pitch(spoken_index, total_spoken, pitch_swing) + (word_stress - 1.0) * 0.034
         if stress > 1:
             pitch_target += 0.025
         before = len(samples)
@@ -795,6 +864,8 @@ def _render_fallback_word(
             "viseme": spec.viseme,
             "kind": spec.kind,
             "render_source": "source-filter-fallback",
+            "stress": round(word_stress, 3),
+            "phrase_position": round(position, 3),
         }
         phoneme_cues.append(cue)
         if spec.viseme != "rest":
@@ -815,18 +886,25 @@ def _render_unit_bank_word(
     pitch_swing: float,
     spoken_index: int,
     total_spoken: int,
+    word_index: int,
+    word_count: int,
+    connected_left: bool,
+    connected_right: bool,
     sample_offset: int,
 ) -> tuple[SampleBuffer, list[dict[str, Any]], list[dict[str, Any]], int]:
     samples: SampleBuffer = []
     visemes: list[dict[str, Any]] = []
     phoneme_cues: list[dict[str, Any]] = []
     gestures = UNIT_BANK[word]
-    word_pitch = _phrase_pitch(spoken_index, total_spoken, pitch_swing)
+    stress = _word_stress(word)
+    phrase_position = _phrase_position(word_index, word_count)
+    word_pitch = _phrase_pitch_at(phrase_position, pitch_swing) + (stress - 1.0) * 0.036
+    duration_scale = _stress_duration_scale(stress)
     for index, gesture in enumerate(gestures):
         spec = phoneme_spec(gesture.symbol)
-        count = max(1, int((gesture.duration / max(0.35, pace)) * SAMPLE_RATE))
+        count = max(1, int((gesture.duration * duration_scale / max(0.35, pace)) * SAMPLE_RATE))
         before = len(samples)
-        pitch_target = word_pitch + gesture.pitch - index * 0.006
+        pitch_target = word_pitch + gesture.pitch - index * 0.004
         rendered = _render_phoneme(
             spec,
             count,
@@ -836,12 +914,12 @@ def _render_unit_bank_word(
             brightness,
             warmth,
             grit,
-            energy * gesture.energy,
+            energy * gesture.energy * stress,
             sample_offset + len(samples),
             consonant_boost=gesture.consonant,
             unit_mode=True,
-            first=index == 0,
-            last=index == len(gestures) - 1,
+            first=index == 0 and not connected_left,
+            last=index == len(gestures) - 1 and not connected_right,
         )
         samples.extend(rendered)
         start = before / SAMPLE_RATE
@@ -854,6 +932,8 @@ def _render_unit_bank_word(
             "viseme": spec.viseme,
             "kind": spec.kind,
             "render_source": "unit-bank",
+            "stress": round(stress, 3),
+            "phrase_position": round(phrase_position, 3),
         }
         phoneme_cues.append(cue)
         if spec.viseme != "rest":
@@ -870,7 +950,9 @@ def synthesize_text(
     base, pace, brightness, grit, warmth = _calibrated_voice_settings(voice)
     base, pace, brightness, grit, energy, pitch_swing = _emotion_settings(emotion, base, pace, brightness, grit)
     tokens = tokenize_text(text)
+    spoken_tokens = [token for token in tokens if token not in PUNCTUATION_PAUSES]
     total_spoken = max(1, sum(len(UNIT_BANK.get(token, tuple(g2p_word(token)))) for token in tokens if token not in PUNCTUATION_PAUSES))
+    word_count = max(1, len(spoken_tokens))
 
     samples: SampleBuffer = []
     visemes: list[dict[str, Any]] = []
@@ -878,6 +960,7 @@ def synthesize_text(
     phoneme_cues: list[dict[str, Any]] = []
     state = SourceFilterState()
     spoken_index = 0
+    word_index = 0
     for index, token in enumerate(tokens):
         if token in PUNCTUATION_PAUSES:
             count = max(1, int(_pause_duration(token, pace) * SAMPLE_RATE))
@@ -886,6 +969,8 @@ def synthesize_text(
 
         word_start_samples = len(samples)
         word_start = word_start_samples / SAMPLE_RATE
+        stress = _word_stress(token)
+        phrase_position = _phrase_position(word_index, word_count)
         if token in UNIT_BANK:
             rendered, word_visemes, word_phonemes, spoken_index = _render_unit_bank_word(
                 token,
@@ -899,6 +984,10 @@ def synthesize_text(
                 pitch_swing,
                 spoken_index,
                 total_spoken,
+                word_index,
+                word_count,
+                _adjacent_unit_word(tokens, index, -1),
+                _adjacent_unit_word(tokens, index, 1),
                 len(samples),
             )
             render_source = "unit-bank"
@@ -915,6 +1004,8 @@ def synthesize_text(
                 pitch_swing,
                 spoken_index,
                 total_spoken,
+                word_index,
+                word_count,
                 len(samples),
             )
             render_source = "source-filter-fallback"
@@ -936,11 +1027,17 @@ def synthesize_text(
                 "start": round(word_start, 3),
                 "end": round(max(word_start, word_end), 3),
                 "render_source": render_source,
+                "stress": round(stress, 3),
+                "phrase_position": round(phrase_position, 3),
             }
         )
         if index < len(tokens) - 1:
-            count = max(1, int(_pause_duration(" ", pace) * SAMPLE_RATE))
-            _crossfade_append(samples, [0.0] * count, fade=24)
+            next_token = tokens[index + 1]
+            if next_token not in PUNCTUATION_PAUSES:
+                _blend_state_toward_next_unit(state, next_token)
+                count = max(1, int(_word_gap_duration(token, next_token, pace) * SAMPLE_RATE))
+                _crossfade_append(samples, [0.0] * count, fade=24)
+        word_index += 1
     mastered = master_voice(samples, warmth_amount=warmth * 0.36, cleanup=False)
     return normalize(mastered, target=0.86), visemes, word_cues, phoneme_cues
 

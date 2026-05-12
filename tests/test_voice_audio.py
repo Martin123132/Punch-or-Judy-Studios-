@@ -99,14 +99,16 @@ class VoiceAudioTests(unittest.TestCase):
         self.assertGreater(rms(samples), 0.02)
         self.assertTrue(any(unit in {"ee", "oh", "ae"} for unit in phoneme_units("hello local stage")))
 
-    def test_v07_demo_phrases_use_unit_bank_with_aligned_cues(self) -> None:
-        self.assertEqual(AUDIO_ENGINE_VERSION, "puppetvoice-0.7")
+    def test_v08_demo_phrases_use_unit_bank_with_aligned_cues(self) -> None:
+        self.assertEqual(AUDIO_ENGINE_VERSION, "puppetvoice-0.8")
         self.assertTrue(DEMO_WORDS.issubset(UNIT_BANK_WORDS))
         for phrase in DEMO_PHRASES:
             samples, visemes, word_cues, phoneme_cues = synthesize_text(phrase, DEFAULT_CHARACTERS[0].voice.to_dict())
             self.assertEqual([cue["word"] for cue in word_cues], _spoken_words(phrase))
             self.assertTrue(all(cue["render_source"] == "unit-bank" for cue in word_cues))
             self.assertTrue(all(cue["render_source"] == "unit-bank" for cue in phoneme_cues))
+            self.assertTrue(all("stress" in cue and "phrase_position" in cue for cue in word_cues))
+            self.assertTrue(all("stress" in cue and "phrase_position" in cue for cue in phoneme_cues))
             self.assertTrue(visemes)
             for word in word_cues:
                 phones = [cue for cue in phoneme_cues if cue["word"] == word["word"]]
@@ -118,6 +120,27 @@ class VoiceAudioTests(unittest.TestCase):
             self.assertLess(seconds, 3.2)
             self.assertGreater(rms(samples), 0.08)
             self.assertLessEqual(max(abs(sample) for sample in samples), 1.0)
+
+    def test_v08_phrase_prosody_shortens_unit_gaps_and_marks_stress(self) -> None:
+        voice = DEFAULT_CHARACTERS[0].voice.to_dict()
+        samples, _, word_cues, _ = synthesize_text("the puppet voice is clear now", voice)
+        by_word = {cue["word"]: cue for cue in word_cues}
+        self.assertLess(by_word["the"]["stress"], 1.0)
+        self.assertLess(by_word["is"]["stress"], 1.0)
+        self.assertGreater(by_word["puppet"]["stress"], by_word["the"]["stress"])
+        self.assertGreater(by_word["clear"]["stress"], by_word["is"]["stress"])
+        the_segment = samples[int(by_word["the"]["start"] * SAMPLE_RATE) : int(by_word["the"]["end"] * SAMPLE_RATE)]
+        clear_segment = samples[int(by_word["clear"]["start"] * SAMPLE_RATE) : int(by_word["clear"]["end"] * SAMPLE_RATE)]
+        self.assertGreater(rms(clear_segment), rms(the_segment))
+
+        _, _, punctuated_words, _ = synthesize_text("sound first, motion second", voice)
+        gaps = {
+            (left["word"], right["word"]): right["start"] - left["end"]
+            for left, right in zip(punctuated_words, punctuated_words[1:])
+        }
+        self.assertLess(gaps[("sound", "first")], 0.06)
+        self.assertGreater(gaps[("first", "motion")], gaps[("sound", "first")] + 0.07)
+        self.assertLess(gaps[("motion", "second")], 0.06)
 
     def test_source_filter_primitives_are_stable_and_deterministic(self) -> None:
         coeffs = _resonator_coefficients(640.0, 120.0)
@@ -211,6 +234,8 @@ class VoiceAudioTests(unittest.TestCase):
             stale_track["engine_version"] = "puppetvoice-0.5"
             self.assertFalse(audio_track_is_current(stale_track))
             stale_track["engine_version"] = "puppetvoice-0.6"
+            self.assertFalse(audio_track_is_current(stale_track))
+            stale_track["engine_version"] = "puppetvoice-0.7"
             self.assertFalse(audio_track_is_current(stale_track))
             self.assertLess(track.line_cues[0]["start"], track.line_cues[0]["end"])
             with wave.open(track.wav_path, "rb") as wf:
