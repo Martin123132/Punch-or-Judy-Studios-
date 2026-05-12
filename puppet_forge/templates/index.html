@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Punch or Judy Studios</title>
+    <link rel="stylesheet" href="/static/app.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="mark" aria-hidden="true">PF</div>
+          <div>
+            <h1>Punch or Judy</h1>
+            <p id="healthText">Local studio warming up</p>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head">
+            <h2>Cast</h2>
+            <button id="newCharacterButton" class="icon-button" title="New character">+</button>
+          </div>
+          <div id="characterList" class="character-list"></div>
+        </div>
+
+        <div class="panel compact">
+          <h2>Scene</h2>
+          <select id="sceneSelect"></select>
+          <textarea id="sceneNotes" rows="4" placeholder="Scene notes"></textarea>
+        </div>
+      </aside>
+
+      <main class="workspace">
+        <header class="topbar">
+          <div class="provider-strip">
+            <label>
+              Provider
+              <select id="providerSelect"></select>
+            </label>
+            <label>
+              Model
+              <input id="modelInput" autocomplete="off" />
+            </label>
+            <label>
+              Temperature
+              <input id="temperatureInput" type="range" min="0" max="1" step="0.05" value="0.7" />
+            </label>
+          </div>
+          <div class="status-pills">
+            <span id="offlinePill" class="status-pill">Local ready</span>
+            <span id="ffmpegPill" class="status-pill">Video check</span>
+          </div>
+        </header>
+
+        <section class="stage-wrap">
+          <canvas id="stageCanvas" width="960" height="540"></canvas>
+          <div class="stage-caption">
+            <strong id="performanceTitle">No show generated yet</strong>
+            <span id="stageStatus">Write a prompt, pick a cast, then forge the scene.</span>
+          </div>
+        </section>
+
+        <section class="composer">
+          <textarea id="promptInput" rows="3">Make a short scene where the puppets explain how a local-first AI show studio can turn text into voice, puppet motion, and video without requiring cloud keys.</textarea>
+          <div class="button-row">
+            <button id="generateButton" class="primary-button">Forge Script</button>
+            <button id="voiceButton">Make Voice</button>
+            <button id="renderButton">Render Show</button>
+          </div>
+        </section>
+
+        <section class="timeline" aria-label="Performance timeline">
+          <div class="timeline-head">
+            <h2>Timeline</h2>
+            <span id="timelineMeta">No lines yet</span>
+          </div>
+          <div id="waveform" class="waveform"></div>
+          <div id="scriptLines" class="script-lines"></div>
+        </section>
+      </main>
+
+      <aside class="inspector">
+        <div class="tabs" role="tablist">
+          <button class="tab active" data-tab="character">Character</button>
+          <button class="tab" data-tab="settings">Settings</button>
+          <button class="tab" data-tab="exports">Exports</button>
+        </div>
+
+        <section id="characterTab" class="inspector-tab active">
+          <h2>Character Lab</h2>
+          <label>Name <input id="charName" /></label>
+          <label>Role <input id="charRole" /></label>
+          <label>Lore <textarea id="charLore" rows="4"></textarea></label>
+          <label>Speech Style <textarea id="charStyle" rows="3"></textarea></label>
+          <div class="grid-2">
+            <label>Kindness <input id="charKindness" type="range" min="0" max="1" step="0.01" /></label>
+            <label>Chaos <input id="charChaos" type="range" min="0" max="1" step="0.01" /></label>
+            <label>Pitch <input id="voicePitch" type="range" min="95" max="280" step="1" /></label>
+            <label>Pace <input id="voicePace" type="range" min="0.55" max="1.45" step="0.01" /></label>
+          </div>
+          <div class="swatches">
+            <label>Body <input id="bodyColor" type="color" /></label>
+            <label>Accent <input id="accentColor" type="color" /></label>
+          </div>
+          <button id="saveCharacterButton" class="primary-button">Save Character</button>
+        </section>
+
+        <section id="settingsTab" class="inspector-tab">
+          <h2>Provider Keys</h2>
+          <p class="quiet">Keys stay in your local app settings. Local mode and Ollama need no cloud key.</p>
+          <label>OpenAI Key <input id="openaiKey" type="password" autocomplete="off" /></label>
+          <label>Anthropic Key <input id="anthropicKey" type="password" autocomplete="off" /></label>
+          <label>Gemini Key <input id="geminiKey" type="password" autocomplete="off" /></label>
+          <label>Ollama Host <input id="ollamaHost" value="http://127.0.0.1:11434" /></label>
+          <label>Ollama Model <input id="ollamaModel" value="llama3" /></label>
+          <button id="saveSettingsButton">Save Settings</button>
+          <pre id="doctorOutput"></pre>
+        </section>
+
+        <section id="exportsTab" class="inspector-tab">
+          <h2>Exports</h2>
+          <div id="exportList" class="export-list"></div>
+        </section>
+      </aside>
+    </div>
+
+    <div id="toast" class="toast" role="status"></div>
+    <script src="/static/app.js"></script>
+  </body>
+</html>
