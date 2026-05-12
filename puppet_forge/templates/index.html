@@ -57,15 +57,22 @@
         <section class="stage-wrap">
           <canvas id="stageCanvas" width="960" height="540"></canvas>
           <div class="stage-caption">
-            <strong id="performanceTitle">No show generated yet</strong>
-            <span id="stageStatus">Write a prompt, pick a cast, then forge the scene.</span>
+            <div class="stage-title">
+              <strong id="performanceTitle">No show generated yet</strong>
+              <span id="stageStatus">Write a prompt, pick a cast, then run the show.</span>
+            </div>
+            <div class="playback-cluster">
+              <span id="activeCue">Voice not generated yet</span>
+              <audio id="showAudio" controls preload="metadata"></audio>
+            </div>
           </div>
         </section>
 
         <section class="composer">
           <textarea id="promptInput" rows="3">Make a short scene where the puppets explain how a local-first AI show studio can turn text into voice, puppet motion, and video without requiring cloud keys.</textarea>
           <div class="button-row">
-            <button id="generateButton" class="primary-button">Forge Script</button>
+            <button id="runShowButton" class="primary-button">Run Show</button>
+            <button id="generateButton">Forge Script</button>
             <button id="voiceButton">Make Voice</button>
             <button id="renderButton">Render Show</button>
           </div>
@@ -99,6 +106,9 @@
             <label>Chaos <input id="charChaos" type="range" min="0" max="1" step="0.01" /></label>
             <label>Pitch <input id="voicePitch" type="range" min="95" max="280" step="1" /></label>
             <label>Pace <input id="voicePace" type="range" min="0.55" max="1.45" step="0.01" /></label>
+            <label>Brightness <input id="voiceBrightness" type="range" min="0" max="1" step="0.01" /></label>
+            <label>Grit <input id="voiceGrit" type="range" min="0" max="1" step="0.01" /></label>
+            <label>Warmth <input id="voiceWarmth" type="range" min="0" max="1" step="0.01" /></label>
           </div>
           <div class="swatches">
             <label>Body <input id="bodyColor" type="color" /></label>
@@ -127,6 +137,7 @@
     </div>
 
     <div id="toast" class="toast" role="status"></div>
+    <script src="/static/stage.js"></script>
     <script src="/static/app.js"></script>
   </body>
 </html>

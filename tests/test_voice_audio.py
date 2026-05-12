@@ -13,9 +13,21 @@ from puppet_forge.voice import SAMPLE_RATE, synthesize_performance, synthesize_t
 
 class VoiceAudioTests(unittest.TestCase):
     def test_synthesize_text_creates_samples_and_visemes(self) -> None:
-        samples, visemes = synthesize_text("Hello local stage!", DEFAULT_CHARACTERS[0].voice.to_dict())
+        samples, visemes, word_cues = synthesize_text("Hello local stage!", DEFAULT_CHARACTERS[0].voice.to_dict())
         self.assertGreater(len(samples), SAMPLE_RATE // 2)
         self.assertTrue(any(event["viseme"] in {"open", "wide", "round"} for event in visemes))
+        self.assertEqual([cue["word"] for cue in word_cues], ["hello", "local", "stage"])
+
+    def test_word_timing_punctuation_and_emotion_are_deterministic(self) -> None:
+        voice = DEFAULT_CHARACTERS[0].voice.to_dict()
+        plain, _, plain_words = synthesize_text("Hello local stage", voice, "steady")
+        punctuated, _, punctuated_words = synthesize_text("Hello, local stage!", voice, "steady")
+        careful, _, _ = synthesize_text("Hello local stage", voice, "careful")
+        playful, _, _ = synthesize_text("Hello local stage", voice, "playful")
+        self.assertGreater(len(punctuated), len(plain) + int(0.12 * SAMPLE_RATE))
+        self.assertGreater(len(careful), len(playful))
+        self.assertEqual(plain_words, synthesize_text("Hello local stage", voice, "steady")[2])
+        self.assertEqual([cue["word"] for cue in punctuated_words], ["hello", "local", "stage"])
 
     def test_pgf_mastering_keeps_samples_normalized(self) -> None:
         raw = [0.0, 1.8, -1.7, 0.2, -0.1, 0.0] * 20
@@ -37,6 +49,9 @@ class VoiceAudioTests(unittest.TestCase):
             track = synthesize_performance(perf, chars, Path(tmp))
             self.assertTrue(Path(track.wav_path).exists())
             self.assertEqual(len(track.line_cues), 1)
+            self.assertGreaterEqual(len(track.word_cues), 5)
+            self.assertEqual(track.word_cues[0]["line_index"], 0)
+            self.assertEqual(track.word_cues[0]["character_id"], chars[0]["id"])
             self.assertLess(track.line_cues[0]["start"], track.line_cues[0]["end"])
             with wave.open(track.wav_path, "rb") as wf:
                 self.assertEqual(wf.getframerate(), SAMPLE_RATE)

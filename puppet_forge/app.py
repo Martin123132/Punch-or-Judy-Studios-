@@ -171,7 +171,7 @@ class PuppetForgeHandler(BaseHTTPRequestHandler):
                     "characters": list_characters(con),
                     "scenes": list_scenes(con),
                     "performances": list_performances(con),
-                    "renders": list_render_jobs(con),
+                    "renders": [_public_paths(render) for render in list_render_jobs(con)],
                     "settings": list_settings(con),
                     "providers": providers.available_providers(),
                     "doctor": doctor(),
@@ -325,7 +325,7 @@ class PuppetForgeHandler(BaseHTTPRequestHandler):
             scene = get_scene(con, performance["scene_id"]) or list_scenes(con)[0]
             characters = list_characters(con)
             tracks = list_audio_tracks(con, performance_id)
-            if tracks:
+            if tracks and tracks[0].get("word_cues"):
                 audio = tracks[0]
             else:
                 audio_track = synthesize_performance(performance, characters, outputs_dir() / performance_id)

@@ -118,6 +118,7 @@ class AudioTrack:
     duration_seconds: float
     visemes: list[dict[str, Any]]
     line_cues: list[dict[str, Any]] = field(default_factory=list)
+    word_cues: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

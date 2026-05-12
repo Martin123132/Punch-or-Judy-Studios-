@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -68,8 +69,16 @@ class StorageProviderRendererTests(unittest.TestCase):
             self.assertTrue(Path(job.manifest_path).exists())
             self.assertTrue(Path(job.package_path).exists())
             self.assertTrue(Path(job.wav_path).exists())
+            self.assertTrue((Path(job.output_dir) / "stage.js").exists())
             self.assertTrue((Path(job.output_dir) / "subtitles.vtt").exists())
             self.assertTrue((Path(job.output_dir) / "script.txt").exists())
+            manifest = json.loads(Path(job.manifest_path).read_text(encoding="utf-8"))
+            self.assertEqual(manifest["version"], 2)
+            self.assertTrue(manifest["cast"][0]["rig"])
+            self.assertTrue(manifest["audio"]["line_cues"])
+            self.assertTrue(manifest["audio"]["word_cues"])
+            self.assertEqual(manifest["motion_cues"]["gesture_source"], "word_cues")
+            self.assertEqual(manifest["stage_style"]["renderer"], "local-2d-puppet-stage")
 
 
 if __name__ == "__main__":

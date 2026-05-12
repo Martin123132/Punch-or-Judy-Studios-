@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .models import RenderJob
-from .paths import render_dir
+from .paths import render_dir, repo_root
 
 
 WIDTH = 640
@@ -246,62 +246,158 @@ def write_script_text(path: Path, performance: dict[str, Any]) -> None:
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
-def write_manifest(path: Path, performance: dict[str, Any], scene: dict[str, Any], audio_track: dict[str, Any], render_job: RenderJob) -> None:
+def _cast_payload(characters: list[dict[str, Any]], performance: dict[str, Any]) -> list[dict[str, Any]]:
+    ids: list[str] = []
+    for line in performance.get("lines", []):
+        character_id = line.get("character_id")
+        if character_id and character_id not in ids:
+            ids.append(character_id)
+    if not ids:
+        ids = [character.get("id") for character in characters[:3] if character.get("id")]
+    by_id = {character.get("id"): character for character in characters}
+    cast: list[dict[str, Any]] = []
+    for character_id in ids[:3]:
+        character = by_id.get(character_id)
+        if character:
+            cast.append(
+                {
+                    "id": character.get("id"),
+                    "name": character.get("name"),
+                    "role": character.get("role"),
+                    "rig": character.get("rig") or {},
+                    "voice": character.get("voice") or {},
+                }
+            )
+    return cast
+
+
+def _performance_characters(characters: list[dict[str, Any]], performance: dict[str, Any]) -> list[dict[str, Any]]:
+    ids: list[str] = []
+    for line in performance.get("lines", []):
+        character_id = line.get("character_id")
+        if character_id and character_id not in ids:
+            ids.append(character_id)
+    by_id = {character.get("id"): character for character in characters}
+    selected = [by_id[item] for item in ids if item in by_id]
+    return selected[:3] or characters[:3]
+
+
+def _stage_style(scene: dict[str, Any]) -> dict[str, Any]:
+    mood = f"{scene.get('mood', '')} {scene.get('lighting', '')}".lower()
+    night = "night" in mood or "quiet" in mood or "moon" in mood
+    return {
+        "renderer": "local-2d-puppet-stage",
+        "width": WIDTH,
+        "height": HEIGHT,
+        "mood": scene.get("mood", "curious"),
+        "lighting": scene.get("lighting", "warm theatre wash"),
+        "camera": scene.get("camera", "center-stage two-shot"),
+        "palette": "moonlit" if night else "workshop",
+    }
+
+
+def _motion_cues(audio_track: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "timing_source": "audio-time",
+        "mouth_sync": "visemes",
+        "speaker_focus": "line_cues",
+        "gesture_source": "word_cues",
+        "blink_cycle_seconds": 4.8,
+        "line_count": len(audio_track.get("line_cues") or []),
+        "word_count": len(audio_track.get("word_cues") or []),
+    }
+
+
+def write_manifest(
+    path: Path,
+    performance: dict[str, Any],
+    characters: list[dict[str, Any]],
+    scene: dict[str, Any],
+    audio_track: dict[str, Any],
+    render_job: RenderJob,
+) -> None:
     payload = {
         "format": "puppet-forge-render-bundle",
-        "version": 1,
+        "version": 2,
         "performance": performance,
+        "cast": _cast_payload(characters, performance),
         "scene": scene,
+        "stage_style": _stage_style(scene),
+        "motion_cues": _motion_cues(audio_track),
         "audio": {
             "duration_seconds": audio_track.get("duration_seconds"),
             "wav": Path(str(audio_track.get("wav_path", ""))).name,
             "line_cues": audio_track.get("line_cues") or [],
+            "word_cues": audio_track.get("word_cues") or [],
             "viseme_count": len(audio_track.get("visemes") or []),
+            "visemes": audio_track.get("visemes") or [],
         },
         "render": render_job.to_dict(),
     }
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
-def write_preview_html(path: Path, performance: dict[str, Any], scene: dict[str, Any], audio_track: dict[str, Any], render_job: RenderJob) -> None:
-    data = json.dumps(
-        {
-            "performance": performance,
-            "scene": scene,
-            "audio": {
-                "duration_seconds": audio_track.get("duration_seconds"),
-                "line_cues": audio_track.get("line_cues") or [],
-                "visemes": audio_track.get("visemes") or [],
-            },
-            "render": render_job.to_dict(),
-        }
+def write_preview_html(
+    path: Path,
+    performance: dict[str, Any],
+    characters: list[dict[str, Any]],
+    scene: dict[str, Any],
+    audio_track: dict[str, Any],
+    render_job: RenderJob,
+) -> None:
+    data = {
+        "characters": _cast_payload(characters, performance),
+        "performance": performance,
+        "scene": scene,
+        "audio": {
+            "duration_seconds": audio_track.get("duration_seconds"),
+            "line_cues": audio_track.get("line_cues") or [],
+            "word_cues": audio_track.get("word_cues") or [],
+            "visemes": audio_track.get("visemes") or [],
+        },
+        "render": render_job.to_dict(),
+    }
+    data_text = html.escape(json.dumps(data), quote=False)
+    mp4_link = (
+        f'<a href="{html.escape(Path(render_job.mp4_path).name)}">MP4</a>'
+        if render_job.mp4_path
+        else ""
     )
     html_text = f"""<!doctype html>
 <html lang="en">
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{html.escape(performance.get("title", "Puppet Forge Render"))}</title>
 <style>
-body {{ margin: 0; background: #15171c; color: #f6f1e8; font: 15px/1.5 Segoe UI, Arial, sans-serif; }}
+:root {{ color-scheme: dark; --bg: #15171c; --panel: #20242d; --line: #303644; --text: #f6f1e8; --muted: #aab3c2; --gold: #f3b75f; --teal: #68c3c0; }}
+* {{ box-sizing: border-box; }}
+body {{ margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 Segoe UI, Arial, sans-serif; letter-spacing: 0; }}
 main {{ max-width: 1120px; margin: 0 auto; padding: 28px; }}
-.stage {{ width: 100%; border-radius: 8px; overflow: hidden; background: #20232a; box-shadow: 0 20px 80px #0008; }}
-canvas {{ width: 100%; display: block; background: #151824; }}
-audio {{ width: 100%; margin-top: 16px; }}
-.line {{ display: grid; grid-template-columns: 150px 1fr; gap: 12px; border: 1px solid #303644; border-radius: 8px; padding: 10px 12px; margin: 8px 0; background: #20242d; }}
-.line.active {{ border-color: #f3b75f; background: #2a3039; }}
-.meta {{ color: #aab3c2; }}
-.exports {{ display: flex; flex-wrap: wrap; gap: 12px; margin: 16px 0; }}
-.exports a {{ border: 1px solid #303644; border-radius: 8px; padding: 8px 10px; text-decoration: none; }}
-a {{ color: #9bd6ff; }}
+h1 {{ margin: 0 0 6px; font-size: clamp(24px, 4vw, 40px); line-height: 1.05; }}
+.meta {{ color: var(--muted); margin: 0 0 18px; }}
+.stage {{ width: 100%; border-radius: 8px; overflow: hidden; background: #151824; border: 1px solid var(--line); box-shadow: 0 20px 80px #0008; }}
+canvas {{ width: 100%; display: block; aspect-ratio: {WIDTH} / {HEIGHT}; background: #151824; }}
+audio {{ width: 100%; margin: 16px 0 8px; }}
+.status {{ color: var(--muted); margin: 0 0 16px; }}
+.exports {{ display: flex; flex-wrap: wrap; gap: 10px; margin: 16px 0; }}
+.exports a {{ border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; color: #9bd6ff; text-decoration: none; background: #20242d; }}
+.line {{ display: grid; grid-template-columns: minmax(110px, 150px) 1fr; gap: 12px; border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin: 8px 0; background: var(--panel); }}
+.line strong {{ color: var(--gold); }}
+.line.active {{ border-color: var(--gold); background: #2a3039; box-shadow: inset 4px 0 0 var(--gold); }}
+.word {{ color: var(--teal); min-height: 22px; }}
+@media (max-width: 680px) {{ main {{ padding: 16px; }} .line {{ grid-template-columns: 1fr; }} }}
 </style>
 <main>
   <h1>{html.escape(performance.get("title", "Puppet Forge Render"))}</h1>
-  <p class="meta">Interactive local animatic. Audio, timing, subtitles, and puppet motion were generated on this machine.</p>
+  <p class="meta">Interactive local animatic generated on this machine.</p>
   <div class="stage"><canvas id="stage" width="{WIDTH}" height="{HEIGHT}"></canvas></div>
-  <audio controls src="{html.escape(Path(render_job.wav_path or '').name)}"></audio>
-  <p>Status: {html.escape(render_job.status)}. {html.escape(render_job.message)}</p>
+  <audio id="showAudio" controls src="{html.escape(Path(render_job.wav_path or '').name)}"></audio>
+  <p id="activeWord" class="word"></p>
+  <p class="status">Status: {html.escape(render_job.status)}. {html.escape(render_job.message)}</p>
   <div class="exports">
     <a href="{html.escape(Path(render_job.preview_svg or '').name)}">Stage SVG</a>
     <a href="{html.escape(Path(render_job.wav_path or '').name)}">WAV</a>
+    {mp4_link}
     <a href="subtitles.vtt">Subtitles</a>
     <a href="script.txt">Script</a>
     <a href="manifest.json">Manifest</a>
@@ -309,57 +405,26 @@ a {{ color: #9bd6ff; }}
   </div>
   <div id="script"></div>
 </main>
+<script id="show-data" type="application/json">{data_text}</script>
+<script src="stage.js"></script>
 <script>
-const data = {data};
-const canvas = document.getElementById('stage');
-const ctx = canvas.getContext('2d');
-const audio = document.querySelector('audio');
-const cast = data.performance.lines.reduce((acc, line) => {{
-  if (!acc.find(item => item.character_id === line.character_id)) acc.push(line);
-  return acc;
-}}, []).slice(0, 3);
-const colors = ['#b85f37', '#21304d', '#457b5a'];
-const positions = [[220, 212], [420, 212], [320, 222]];
-function ellipse(x, y, rx, ry, color) {{ ctx.fillStyle = color; ctx.beginPath(); ctx.ellipse(x, y, rx, ry, 0, 0, Math.PI * 2); ctx.fill(); }}
-function visemeFor(characterId, t) {{
-  const hit = data.audio.visemes.find(v => v.character_id === characterId && v.start <= t && v.end >= t);
-  return hit ? hit.viseme : 'rest';
-}}
-function activeLine(t) {{
-  return data.audio.line_cues.find(cue => cue.start <= t && cue.end >= t);
-}}
-function drawPuppet(line, index, t) {{
-  const [px, py] = positions[index] || positions[0];
-  const x = px + Math.sin(t * 2.2 + index) * 8;
-  const y = py + Math.sin(t * 4 + index) * 6;
-  const body = colors[index % colors.length];
-  const accent = index === 0 ? '#ffd166' : '#8ecae6';
-  const mouth = '#171219';
-  const viseme = visemeFor(line.character_id, t);
-  ellipse(x, y + 78, 48, 12, 'rgba(0,0,0,.35)');
-  ctx.strokeStyle = accent; ctx.globalAlpha = .58; ctx.lineWidth = 4; ctx.beginPath(); ctx.moveTo(x, 42); ctx.lineTo(x, y - 45); ctx.stroke(); ctx.globalAlpha = 1;
-  ellipse(x, y + 44, 45, 58, body); ellipse(x, y - 24, 45, 40, body);
-  ellipse(x - 15, y - 30, 8, 11, '#f8fbff'); ellipse(x + 15, y - 30, 8, 11, '#f8fbff');
-  ellipse(x - 14, y - 29, 3, 4, '#0c0e14'); ellipse(x + 16, y - 29, 3, 4, '#0c0e14');
-  if (viseme === 'round') ellipse(x, y - 5, 11, 16, mouth);
-  else if (viseme === 'open') ellipse(x, y - 5, 16, 20, mouth);
-  else if (viseme === 'wide') ellipse(x, y - 5, 23, 7, mouth);
-  else if (viseme === 'closed') {{ ctx.fillStyle = mouth; ctx.fillRect(x - 16, y - 8, 32, 4); }}
-  else ellipse(x, y - 5, 15, 5, mouth);
-  ctx.fillStyle = '#fff5dd'; ctx.font = '700 17px Segoe UI, Arial'; ctx.textAlign = 'center'; ctx.fillText(line.character_name, x, y + 106);
-}}
-function draw() {{
-  const t = audio.currentTime || (performance.now() / 1000 % Math.max(1, data.audio.duration_seconds || 1));
-  const grad = ctx.createLinearGradient(0, 0, 0, canvas.height); grad.addColorStop(0, '#121d35'); grad.addColorStop(1, '#33293b'); ctx.fillStyle = grad; ctx.fillRect(0, 0, canvas.width, canvas.height);
-  ellipse(210, 165, 140, 230, 'rgba(255,214,142,.10)'); ellipse(430, 165, 140, 230, 'rgba(120,201,232,.08)');
-  ctx.fillStyle = '#5a3928'; ctx.fillRect(0, 258, 640, 102);
-  cast.forEach((line, index) => drawPuppet(line, index, t));
-  const active = activeLine(t);
-  document.querySelectorAll('.line').forEach(el => el.classList.toggle('active', active && Number(el.dataset.index) === active.index));
-  requestAnimationFrame(draw);
-}}
-document.getElementById('script').innerHTML = data.performance.lines.map((l, idx) => `<div class="line" data-index="${{idx}}"><strong>${{l.character_name}}</strong><span>${{l.text}}</span></div>`).join('');
-draw();
+const data = JSON.parse(document.getElementById('show-data').textContent);
+const script = document.getElementById('script');
+const activeWord = document.getElementById('activeWord');
+script.innerHTML = data.performance.lines.map((line, index) =>
+  `<div class="line" data-line-index="${{index}}"><strong>${{line.character_name}}</strong><span>${{line.text}}</span></div>`
+).join('');
+const stage = window.PuppetStage.create(document.getElementById('stage'), {{
+  onFrame(frame) {{
+    document.querySelectorAll('.line').forEach((element) => {{
+      element.classList.toggle('active', Boolean(frame.activeLine && Number(element.dataset.lineIndex) === frame.activeLine.index));
+    }});
+    activeWord.textContent = frame.activeWord ? `${{frame.activeWord.character_name}}: ${{frame.activeWord.word}}` : '';
+  }}
+}});
+const audio = document.getElementById('showAudio');
+stage.setAudioElement(audio);
+stage.setShow(data);
 </script>
 </html>"""
     path.write_text(html_text, encoding="utf-8")
@@ -381,8 +446,12 @@ def render_performance(
 ) -> RenderJob:
     render_id = f"render-{uuid.uuid4().hex[:8]}"
     out_dir = render_dir(render_id)
+    render_characters = _performance_characters(characters, performance)
     preview_svg = out_dir / "preview.svg"
-    write_preview_svg(preview_svg, characters, scene)
+    write_preview_svg(preview_svg, render_characters, scene)
+    stage_runtime = repo_root() / "puppet_forge" / "static" / "stage.js"
+    if stage_runtime.exists():
+        shutil.copy2(stage_runtime, out_dir / "stage.js")
     source_wav = Path(str(audio_track.get("wav_path", "")))
     bundled_wav = out_dir / source_wav.name
     if source_wav.exists() and source_wav.resolve() != bundled_wav.resolve():
@@ -410,7 +479,7 @@ def render_performance(
         frame_dir.mkdir(exist_ok=True)
         visemes = audio_track.get("visemes") or []
         for i in range(frame_count):
-            _frame(frame_dir / f"frame_{i:04d}.ppm", characters, scene, visemes, i / fps)
+            _frame(frame_dir / f"frame_{i:04d}.ppm", render_characters, scene, visemes, i / fps)
         mp4 = out_dir / f"{render_id}.mp4"
         command = [
             ffmpeg,
@@ -442,7 +511,7 @@ def render_performance(
     job.manifest_path = str(manifest_path)
     package_path = out_dir / f"{render_id}.zip"
     job.package_path = str(package_path)
-    write_manifest(manifest_path, performance, scene, audio_track, job)
-    write_preview_html(preview_html, performance, scene, audio_track, job)
+    write_manifest(manifest_path, performance, render_characters, scene, audio_track, job)
+    write_preview_html(preview_html, performance, render_characters, scene, audio_track, job)
     package_bundle(package_path, out_dir)
     return job
