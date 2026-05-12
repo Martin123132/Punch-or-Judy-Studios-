@@ -1,3 +1,3 @@
 """Puppet Forge: local-first AI puppet show studio."""
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"

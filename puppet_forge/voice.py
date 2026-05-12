@@ -12,7 +12,7 @@ from .models import AudioTrack
 
 
 SAMPLE_RATE = 22050
-AUDIO_ENGINE_VERSION = "puppetvoice-0.6"
+AUDIO_ENGINE_VERSION = "puppetvoice-0.7"
 CLEAR_BASE_FREQUENCY = 158.0
 WORD_RE = re.compile(r"[a-z0-9]+(?:'[a-z0-9]+)?|[.,!?;:-]")
 PUNCTUATION_PAUSES = {
@@ -143,37 +143,91 @@ EXCEPTION_WORDS: dict[str, list[str]] = {
 }
 
 
+def _g(symbol: str, duration: float, energy: float = 1.0, pitch: float = 0.0, consonant: float = 1.0) -> UnitGesture:
+    return UnitGesture(symbol, duration, energy=energy, pitch=pitch, consonant=consonant)
+
+
+def _unit_word(*gestures: UnitGesture) -> tuple[UnitGesture, ...]:
+    return gestures
+
+
 UNIT_BANK: dict[str, tuple[UnitGesture, ...]] = {
-    "the": (
-        UnitGesture("dh", 0.105, energy=1.1, pitch=0.015, consonant=1.35),
-        UnitGesture("uh", 0.155, energy=0.98, pitch=0.006),
+    "the": _unit_word(
+        _g("dh", 0.105, energy=1.1, pitch=0.015, consonant=1.35),
+        _g("uh", 0.155, energy=0.98, pitch=0.006),
     ),
-    "puppet": (
-        UnitGesture("p", 0.082, energy=1.24, pitch=0.012, consonant=1.8),
-        UnitGesture("uh", 0.142, energy=1.02, pitch=0.012),
-        UnitGesture("p", 0.072, energy=1.22, pitch=0.002, consonant=1.75),
-        UnitGesture("eh", 0.142, energy=1.05, pitch=-0.006),
-        UnitGesture("t", 0.07, energy=1.18, pitch=-0.012, consonant=1.65),
+    "puppet": _unit_word(
+        _g("p", 0.082, energy=1.24, pitch=0.012, consonant=1.8),
+        _g("uh", 0.142, energy=1.02, pitch=0.012),
+        _g("p", 0.072, energy=1.22, pitch=0.002, consonant=1.75),
+        _g("eh", 0.142, energy=1.05, pitch=-0.006),
+        _g("t", 0.07, energy=1.18, pitch=-0.012, consonant=1.65),
     ),
-    "voice": (
-        UnitGesture("v", 0.13, energy=1.12, pitch=0.016, consonant=1.35),
-        UnitGesture("oh", 0.17, energy=1.08, pitch=0.012),
-        UnitGesture("ee", 0.13, energy=0.98, pitch=-0.002),
-        UnitGesture("s", 0.125, energy=1.12, pitch=-0.014, consonant=1.45),
+    "voice": _unit_word(
+        _g("v", 0.13, energy=1.12, pitch=0.016, consonant=1.35),
+        _g("oh", 0.17, energy=1.08, pitch=0.012),
+        _g("ee", 0.13, energy=0.98, pitch=-0.002),
+        _g("s", 0.125, energy=1.12, pitch=-0.014, consonant=1.45),
     ),
-    "is": (
-        UnitGesture("ih", 0.13, energy=0.95, pitch=0.006),
-        UnitGesture("z", 0.12, energy=1.03, pitch=-0.006, consonant=1.28),
+    "is": _unit_word(
+        _g("ih", 0.13, energy=0.95, pitch=0.006),
+        _g("z", 0.12, energy=1.03, pitch=-0.006, consonant=1.28),
     ),
-    "clear": (
-        UnitGesture("k", 0.085, energy=1.28, pitch=0.008, consonant=1.85),
-        UnitGesture("l", 0.105, energy=0.96, pitch=0.008),
-        UnitGesture("ee", 0.19, energy=1.08, pitch=0.0),
-        UnitGesture("r", 0.14, energy=0.95, pitch=-0.014),
+    "clear": _unit_word(
+        _g("k", 0.085, energy=1.28, pitch=0.008, consonant=1.85),
+        _g("l", 0.105, energy=0.96, pitch=0.008),
+        _g("ee", 0.19, energy=1.08, pitch=0.0),
+        _g("r", 0.14, energy=0.95, pitch=-0.014),
     ),
-    "now": (
-        UnitGesture("n", 0.12, energy=0.92, pitch=0.004),
-        UnitGesture("aw", 0.25, energy=1.08, pitch=-0.018),
+    "now": _unit_word(
+        _g("n", 0.12, energy=0.92, pitch=0.004),
+        _g("aw", 0.25, energy=1.08, pitch=-0.018),
+    ),
+    "hello": _unit_word(
+        _g("h", 0.105, energy=0.98, pitch=0.018, consonant=1.35),
+        _g("eh", 0.18, energy=1.08, pitch=0.012),
+        _g("l", 0.11, energy=0.96, pitch=-0.002),
+        _g("oh", 0.19, energy=1.06, pitch=-0.012),
+    ),
+    "local": _unit_word(
+        _g("l", 0.105, energy=0.98, pitch=0.012),
+        _g("oh", 0.17, energy=1.07, pitch=0.006),
+        _g("k", 0.085, energy=1.22, pitch=-0.002, consonant=1.75),
+        _g("ah", 0.145, energy=1.0, pitch=-0.01),
+        _g("l", 0.12, energy=0.94, pitch=-0.018),
+    ),
+    "stage": _unit_word(
+        _g("s", 0.11, energy=1.14, pitch=0.014, consonant=1.55),
+        _g("t", 0.075, energy=1.18, pitch=0.006, consonant=1.65),
+        _g("ay", 0.18, energy=1.1, pitch=-0.004),
+        _g("j", 0.11, energy=1.1, pitch=-0.016, consonant=1.45),
+    ),
+    "sound": _unit_word(
+        _g("s", 0.12, energy=1.15, pitch=0.018, consonant=1.6),
+        _g("aw", 0.205, energy=1.1, pitch=0.008),
+        _g("n", 0.12, energy=0.94, pitch=-0.006),
+        _g("d", 0.085, energy=1.1, pitch=-0.018, consonant=1.45),
+    ),
+    "first": _unit_word(
+        _g("f", 0.13, energy=1.12, pitch=0.012, consonant=1.55),
+        _g("er", 0.19, energy=1.03, pitch=0.0),
+        _g("s", 0.095, energy=1.08, pitch=-0.01, consonant=1.45),
+        _g("t", 0.075, energy=1.16, pitch=-0.018, consonant=1.6),
+    ),
+    "motion": _unit_word(
+        _g("m", 0.12, energy=0.96, pitch=0.014),
+        _g("oh", 0.17, energy=1.08, pitch=0.006),
+        _g("sh", 0.135, energy=1.14, pitch=-0.006, consonant=1.55),
+        _g("ah", 0.13, energy=0.96, pitch=-0.012),
+        _g("n", 0.12, energy=0.92, pitch=-0.02),
+    ),
+    "second": _unit_word(
+        _g("s", 0.11, energy=1.12, pitch=0.016, consonant=1.5),
+        _g("eh", 0.145, energy=1.05, pitch=0.008),
+        _g("k", 0.075, energy=1.18, pitch=0.0, consonant=1.7),
+        _g("ah", 0.125, energy=0.95, pitch=-0.008),
+        _g("n", 0.105, energy=0.92, pitch=-0.014),
+        _g("d", 0.085, energy=1.08, pitch=-0.02, consonant=1.42),
     ),
 }
 UNIT_BANK_WORDS = frozenset(UNIT_BANK)
