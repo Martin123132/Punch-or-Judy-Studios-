@@ -12,7 +12,7 @@ from .models import AudioTrack
 
 
 SAMPLE_RATE = 22050
-AUDIO_ENGINE_VERSION = "puppetvoice-0.8"
+AUDIO_ENGINE_VERSION = "puppetvoice-0.9"
 CLEAR_BASE_FREQUENCY = 158.0
 WORD_RE = re.compile(r"[a-z0-9]+(?:'[a-z0-9]+)?|[.,!?;:-]")
 PUNCTUATION_PAUSES = {
@@ -656,11 +656,14 @@ def _vocal_tract_filter(
     pos: float,
     brightness: float,
     warmth: float,
+    formants_override: tuple[float, float, float] | None = None,
+    amplitudes_override: tuple[float, float, float] | None = None,
 ) -> float:
-    formants = _interpolated_formants(state, spec.formants, pos, brightness)
+    formants = formants_override or _interpolated_formants(state, spec.formants, pos, brightness)
+    amplitudes = amplitudes_override or spec.amplitudes
     bandwidths = _bandwidths_for(spec, brightness)
     total = 0.0
-    for index, (frequency, bandwidth, amp) in enumerate(zip(formants, bandwidths, spec.amplitudes)):
+    for index, (frequency, bandwidth, amp) in enumerate(zip(formants, bandwidths, amplitudes)):
         if index >= len(state.formant_states):
             state.formant_states.append(ResonatorState())
         resonated = _resonator_step(excitation, state.formant_states[index], frequency, bandwidth)
@@ -705,6 +708,82 @@ def _fade_for_kind(kind: str) -> int:
     return 104
 
 
+def _render_source_filter_sample(
+    spec: PhonemeSpec,
+    count: int,
+    n: int,
+    state: SourceFilterState,
+    base_freq: float,
+    pitch_target: float,
+    brightness: float,
+    warmth: float,
+    grit: float,
+    energy: float,
+    sample_offset: int,
+    consonant_boost: float = 1.0,
+    unit_mode: bool = False,
+    first: bool = True,
+    last: bool = True,
+    formants_override: tuple[float, float, float] | None = None,
+    amplitudes_override: tuple[float, float, float] | None = None,
+) -> float:
+    burst_count = max(1, int(0.018 * SAMPLE_RATE))
+    release_start = int(count * 0.42) if spec.kind == "stop" else 0
+    nominal_freq = base_freq * (1.0 + pitch_target)
+    pos = n / max(1, count - 1)
+    sample_index = sample_offset + n
+    wander = 0.006 + (0.006 if spec.kind in {"vowel", "liquid", "glide", "nasal"} else 0.0)
+    freq = nominal_freq * (
+        1.0
+        + math.sin(sample_index / SAMPLE_RATE * 6.0) * wander
+        + math.sin(sample_index / SAMPLE_RATE * 17.0) * 0.002
+    )
+    phase = _advance_glottis(state, freq)
+    env = _unit_envelope(pos, spec.kind, first, last) if unit_mode else _envelope(pos, spec.kind)
+    noise = _aspiration_noise(sample_index, state, brightness)
+    glottal = _glottal_source(phase, 0.59 + warmth * 0.08)
+    excitation = 0.0
+
+    if spec.kind == "stop":
+        if n < release_start:
+            excitation = glottal * 0.055 if spec.voiced else 0.0
+        else:
+            release_pos = n - release_start
+            if release_pos < burst_count:
+                excitation += noise * spec.burst * (1.0 - release_pos / burst_count) * 1.25 * consonant_boost
+            excitation += glottal * (0.46 if spec.voiced else 0.08)
+    elif spec.kind == "affricate":
+        if n < burst_count:
+            excitation += noise * spec.burst * (1.0 - n / burst_count) * consonant_boost
+        excitation += noise * max(spec.noise, 0.18) * 1.12 * consonant_boost
+        if spec.voiced:
+            excitation += glottal * 0.32
+    elif spec.kind == "fricative":
+        excitation += noise * max(spec.noise, 0.16) * (1.25 + brightness * 0.35) * consonant_boost
+        if spec.voiced:
+            excitation += glottal * 0.28
+    elif spec.kind == "nasal":
+        excitation = glottal * 0.58 + noise * grit * 0.015
+    elif spec.kind in {"liquid", "glide"}:
+        excitation = glottal * 0.72 + noise * (0.015 + grit * 0.018)
+    else:
+        excitation = glottal * 0.86 + noise * (0.035 + brightness * 0.012 + grit * 0.024)
+
+    sample = _vocal_tract_filter(
+        excitation,
+        spec,
+        state,
+        pos,
+        brightness,
+        warmth,
+        formants_override=formants_override,
+        amplitudes_override=amplitudes_override,
+    )
+    if spec.kind in {"fricative", "affricate"}:
+        sample += excitation * (0.22 + brightness * 0.1) * consonant_boost
+    return clamp(sample * env * energy * 0.86)
+
+
 def _render_phoneme(
     spec: PhonemeSpec,
     count: int,
@@ -722,52 +801,26 @@ def _render_phoneme(
     last: bool = True,
 ) -> SampleBuffer:
     samples: SampleBuffer = []
-    burst_count = max(1, int(0.018 * SAMPLE_RATE))
-    release_start = int(count * 0.42) if spec.kind == "stop" else 0
-    nominal_freq = base_freq * (1.0 + pitch_target)
     for n in range(count):
-        pos = n / max(1, count - 1)
-        wander = 0.006 + (0.006 if spec.kind in {"vowel", "liquid", "glide", "nasal"} else 0.0)
-        freq = nominal_freq * (
-            1.0
-            + math.sin((sample_offset + n) / SAMPLE_RATE * 6.0) * wander
-            + math.sin((sample_offset + n) / SAMPLE_RATE * 17.0) * 0.002
+        samples.append(
+            _render_source_filter_sample(
+                spec,
+                count,
+                n,
+                state,
+                base_freq,
+                pitch_target,
+                brightness,
+                warmth,
+                grit,
+                energy,
+                sample_offset,
+                consonant_boost=consonant_boost,
+                unit_mode=unit_mode,
+                first=first,
+                last=last,
+            )
         )
-        phase = _advance_glottis(state, freq)
-        env = _unit_envelope(pos, spec.kind, first, last) if unit_mode else _envelope(pos, spec.kind)
-        noise = _aspiration_noise(sample_offset + n, state, brightness)
-        glottal = _glottal_source(phase, 0.59 + warmth * 0.08)
-        excitation = 0.0
-
-        if spec.kind == "stop":
-            if n < release_start:
-                excitation = glottal * 0.055 if spec.voiced else 0.0
-            else:
-                release_pos = n - release_start
-                if release_pos < burst_count:
-                    excitation += noise * spec.burst * (1.0 - release_pos / burst_count) * 1.25 * consonant_boost
-                excitation += glottal * (0.46 if spec.voiced else 0.08)
-        elif spec.kind == "affricate":
-            if n < burst_count:
-                excitation += noise * spec.burst * (1.0 - n / burst_count) * consonant_boost
-            excitation += noise * max(spec.noise, 0.18) * 1.12 * consonant_boost
-            if spec.voiced:
-                excitation += glottal * 0.32
-        elif spec.kind == "fricative":
-            excitation += noise * max(spec.noise, 0.16) * (1.25 + brightness * 0.35) * consonant_boost
-            if spec.voiced:
-                excitation += glottal * 0.28
-        elif spec.kind == "nasal":
-            excitation = glottal * 0.58 + noise * grit * 0.015
-        elif spec.kind in {"liquid", "glide"}:
-            excitation = glottal * 0.72 + noise * (0.015 + grit * 0.018)
-        else:
-            excitation = glottal * 0.86 + noise * (0.035 + brightness * 0.012 + grit * 0.024)
-
-        sample = _vocal_tract_filter(excitation, spec, state, pos, brightness, warmth)
-        if spec.kind in {"fricative", "affricate"}:
-            sample += excitation * (0.22 + brightness * 0.1) * consonant_boost
-        samples.append(clamp(sample * env * energy * 0.86))
     state.previous_formants = spec.formants
     return samples
 
@@ -874,6 +927,76 @@ def _render_fallback_word(
     return samples, visemes, phoneme_cues, spoken_index
 
 
+def _lerp_tuple(
+    left: tuple[float, float, float],
+    right: tuple[float, float, float],
+    amount: float,
+) -> tuple[float, float, float]:
+    amount = clamp(amount, 0.0, 1.0)
+    return (
+        left[0] + (right[0] - left[0]) * amount,
+        left[1] + (right[1] - left[1]) * amount,
+        left[2] + (right[2] - left[2]) * amount,
+    )
+
+
+def _unit_transition_width(current: PhonemeSpec, neighbor: PhonemeSpec) -> float:
+    if current.kind == "stop" or neighbor.kind == "stop":
+        return 0.075
+    if current.kind in {"fricative", "affricate"} or neighbor.kind in {"fricative", "affricate"}:
+        return 0.11
+    return 0.22
+
+
+def _morphed_unit_tuple(
+    current: tuple[float, float, float],
+    previous: tuple[float, float, float] | None,
+    next_value: tuple[float, float, float] | None,
+    current_spec: PhonemeSpec,
+    previous_spec: PhonemeSpec | None,
+    next_spec: PhonemeSpec | None,
+    pos: float,
+) -> tuple[float, float, float]:
+    result = current
+    if previous and previous_spec:
+        width = _unit_transition_width(current_spec, previous_spec)
+        if pos < width:
+            result = _lerp_tuple(previous, current, _smoothstep(pos / width))
+    if next_value and next_spec:
+        width = _unit_transition_width(current_spec, next_spec)
+        if pos > 1.0 - width:
+            result = _lerp_tuple(current, next_value, _smoothstep((pos - (1.0 - width)) / width))
+    return result
+
+
+def _morphed_unit_value(
+    current: float,
+    previous: float | None,
+    next_value: float | None,
+    current_spec: PhonemeSpec,
+    previous_spec: PhonemeSpec | None,
+    next_spec: PhonemeSpec | None,
+    pos: float,
+) -> float:
+    result = current
+    if previous is not None and previous_spec:
+        width = _unit_transition_width(current_spec, previous_spec) * 1.35
+        if pos < width:
+            amount = _smoothstep(pos / width)
+            result = previous + (current - previous) * amount
+    if next_value is not None and next_spec:
+        width = _unit_transition_width(current_spec, next_spec) * 1.35
+        if pos > 1.0 - width:
+            amount = _smoothstep((pos - (1.0 - width)) / width)
+            result = current + (next_value - current) * amount
+    return result
+
+
+def _scaled_formants(formants: tuple[float, float, float], brightness: float) -> tuple[float, float, float]:
+    scale = 0.97 + (brightness - 0.5) * 0.05
+    return (formants[0] * scale, formants[1] * scale, formants[2] * scale)
+
+
 def _render_unit_bank_word(
     word: str,
     state: SourceFilterState,
@@ -900,30 +1023,97 @@ def _render_unit_bank_word(
     phrase_position = _phrase_position(word_index, word_count)
     word_pitch = _phrase_pitch_at(phrase_position, pitch_swing) + (stress - 1.0) * 0.036
     duration_scale = _stress_duration_scale(stress)
+    segments: list[dict[str, Any]] = []
+    cursor = 0
     for index, gesture in enumerate(gestures):
         spec = phoneme_spec(gesture.symbol)
         count = max(1, int((gesture.duration * duration_scale / max(0.35, pace)) * SAMPLE_RATE))
-        before = len(samples)
-        pitch_target = word_pitch + gesture.pitch - index * 0.004
-        rendered = _render_phoneme(
-            spec,
-            count,
-            state,
-            base,
-            pitch_target,
-            brightness,
-            warmth,
-            grit,
-            energy * gesture.energy * stress,
-            sample_offset + len(samples),
-            consonant_boost=gesture.consonant,
-            unit_mode=True,
-            first=index == 0 and not connected_left,
-            last=index == len(gestures) - 1 and not connected_right,
+        segments.append(
+            {
+                "gesture": gesture,
+                "spec": spec,
+                "start": cursor,
+                "end": cursor + count,
+                "count": count,
+                "pitch": word_pitch + gesture.pitch - index * 0.004,
+                "energy": energy * gesture.energy * stress,
+            }
         )
-        samples.extend(rendered)
-        start = before / SAMPLE_RATE
-        end = len(samples) / SAMPLE_RATE
+        cursor += count
+
+    for index, segment in enumerate(segments):
+        gesture = segment["gesture"]
+        spec = segment["spec"]
+        count = segment["count"]
+        previous = segments[index - 1] if index > 0 else None
+        next_segment = segments[index + 1] if index + 1 < len(segments) else None
+        previous_spec = previous["spec"] if previous else None
+        next_spec = next_segment["spec"] if next_segment else None
+        for n in range(count):
+            pos = n / max(1, count - 1)
+            formants = _morphed_unit_tuple(
+                spec.formants,
+                previous_spec.formants if previous_spec else None,
+                next_spec.formants if next_spec else None,
+                spec,
+                previous_spec,
+                next_spec,
+                pos,
+            )
+            amplitudes = _morphed_unit_tuple(
+                spec.amplitudes,
+                previous_spec.amplitudes if previous_spec else None,
+                next_spec.amplitudes if next_spec else None,
+                spec,
+                previous_spec,
+                next_spec,
+                pos,
+            )
+            pitch_target = _morphed_unit_value(
+                segment["pitch"],
+                previous["pitch"] if previous else None,
+                next_segment["pitch"] if next_segment else None,
+                spec,
+                previous_spec,
+                next_spec,
+                pos,
+            )
+            energy_target = _morphed_unit_value(
+                segment["energy"],
+                previous["energy"] if previous else None,
+                next_segment["energy"] if next_segment else None,
+                spec,
+                previous_spec,
+                next_spec,
+                pos,
+            )
+            if previous_spec and previous_spec.kind in {"stop", "fricative", "affricate"} and spec.kind == "vowel" and pos < 0.16:
+                energy_target *= 1.0 + (1.0 - pos / 0.16) * 0.1
+                pitch_target += (1.0 - pos / 0.16) * 0.006
+            samples.append(
+                _render_source_filter_sample(
+                    spec,
+                    count,
+                    n,
+                    state,
+                    base,
+                    pitch_target,
+                    brightness,
+                    warmth,
+                    grit,
+                    energy_target,
+                    sample_offset + segment["start"],
+                    consonant_boost=gesture.consonant,
+                    unit_mode=True,
+                    first=index == 0 and not connected_left,
+                    last=index == len(segments) - 1 and not connected_right,
+                    formants_override=_scaled_formants(formants, brightness),
+                    amplitudes_override=amplitudes,
+                )
+            )
+
+        start = segment["start"] / SAMPLE_RATE
+        end = segment["end"] / SAMPLE_RATE
         cue = {
             "phoneme": gesture.symbol,
             "word": word,
@@ -934,6 +1124,7 @@ def _render_unit_bank_word(
             "render_source": "unit-bank",
             "stress": round(stress, 3),
             "phrase_position": round(phrase_position, 3),
+            "unit_mode": "continuous-unit",
         }
         phoneme_cues.append(cue)
         if spec.viseme != "rest":
@@ -1021,16 +1212,17 @@ def synthesize_text(
             shifted_event["start"] = round(shifted_event["start"] + word_start, 3)
             shifted_event["end"] = round(shifted_event["end"] + word_start, 3)
             visemes.append(shifted_event)
-        word_cues.append(
-            {
-                "word": token,
-                "start": round(word_start, 3),
-                "end": round(max(word_start, word_end), 3),
-                "render_source": render_source,
-                "stress": round(stress, 3),
-                "phrase_position": round(phrase_position, 3),
-            }
-        )
+        word_cue = {
+            "word": token,
+            "start": round(word_start, 3),
+            "end": round(max(word_start, word_end), 3),
+            "render_source": render_source,
+            "stress": round(stress, 3),
+            "phrase_position": round(phrase_position, 3),
+        }
+        if render_source == "unit-bank":
+            word_cue["unit_mode"] = "continuous-unit"
+        word_cues.append(word_cue)
         if index < len(tokens) - 1:
             next_token = tokens[index + 1]
             if next_token not in PUNCTUATION_PAUSES:

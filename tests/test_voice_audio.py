@@ -18,6 +18,7 @@ from puppet_forge.voice import (
     g2p_word,
     normalize_text,
     phoneme_units,
+    phoneme_spec,
     synthesize_performance,
     synthesize_text,
     text_to_speech_units,
@@ -49,6 +50,20 @@ def _spoken_words(text: str) -> list[str]:
 
 
 DEMO_WORDS = {word for phrase in DEMO_PHRASES for word in _spoken_words(phrase)}
+SONORANT_KINDS = {"vowel", "liquid", "glide", "nasal"}
+
+
+def _internal_transition_jumps(samples: list[float], phoneme_cues: list[dict]) -> list[tuple[str, str, float]]:
+    jumps = []
+    for left, right in zip(phoneme_cues, phoneme_cues[1:]):
+        if left["word"] != right["word"]:
+            continue
+        index = int(left["end"] * SAMPLE_RATE)
+        if index < 2 or index >= len(samples) - 2:
+            continue
+        jump = max(abs(samples[i] - samples[i - 1]) for i in range(index - 2, index + 3))
+        jumps.append((left["phoneme"], right["phoneme"], jump))
+    return jumps
 
 
 class VoiceAudioTests(unittest.TestCase):
@@ -99,8 +114,8 @@ class VoiceAudioTests(unittest.TestCase):
         self.assertGreater(rms(samples), 0.02)
         self.assertTrue(any(unit in {"ee", "oh", "ae"} for unit in phoneme_units("hello local stage")))
 
-    def test_v08_demo_phrases_use_unit_bank_with_aligned_cues(self) -> None:
-        self.assertEqual(AUDIO_ENGINE_VERSION, "puppetvoice-0.8")
+    def test_v09_demo_phrases_use_unit_bank_with_aligned_cues(self) -> None:
+        self.assertEqual(AUDIO_ENGINE_VERSION, "puppetvoice-0.9")
         self.assertTrue(DEMO_WORDS.issubset(UNIT_BANK_WORDS))
         for phrase in DEMO_PHRASES:
             samples, visemes, word_cues, phoneme_cues = synthesize_text(phrase, DEFAULT_CHARACTERS[0].voice.to_dict())
@@ -109,6 +124,8 @@ class VoiceAudioTests(unittest.TestCase):
             self.assertTrue(all(cue["render_source"] == "unit-bank" for cue in phoneme_cues))
             self.assertTrue(all("stress" in cue and "phrase_position" in cue for cue in word_cues))
             self.assertTrue(all("stress" in cue and "phrase_position" in cue for cue in phoneme_cues))
+            self.assertTrue(all(cue.get("unit_mode") == "continuous-unit" for cue in word_cues))
+            self.assertTrue(all(cue.get("unit_mode") == "continuous-unit" for cue in phoneme_cues))
             self.assertTrue(visemes)
             for word in word_cues:
                 phones = [cue for cue in phoneme_cues if cue["word"] == word["word"]]
@@ -121,7 +138,32 @@ class VoiceAudioTests(unittest.TestCase):
             self.assertGreater(rms(samples), 0.08)
             self.assertLessEqual(max(abs(sample) for sample in samples), 1.0)
 
-    def test_v08_phrase_prosody_shortens_unit_gaps_and_marks_stress(self) -> None:
+    def test_v09_continuous_unit_rendering_is_stable_and_smooth(self) -> None:
+        voice = DEFAULT_CHARACTERS[0].voice.to_dict()
+        first = synthesize_text(" ".join(DEMO_PHRASES), voice)
+        second = synthesize_text(" ".join(DEMO_PHRASES), voice)
+        samples, _, word_cues, phoneme_cues = first
+        self.assertEqual(samples, second[0])
+        self.assertEqual(word_cues, second[2])
+        self.assertEqual(phoneme_cues, second[3])
+        self.assertTrue(all(math.isfinite(sample) for sample in samples))
+        self.assertLessEqual(max(abs(sample) for sample in samples), 1.0)
+        self.assertGreater(rms(samples), 0.08)
+        self.assertGreater(len(samples) / SAMPLE_RATE, 5.0)
+        self.assertLess(len(samples) / SAMPLE_RATE, 8.0)
+
+        jumps = _internal_transition_jumps(samples, phoneme_cues)
+        self.assertTrue(jumps)
+        self.assertLess(max(jump for _, _, jump in jumps), 0.75)
+        sonorant_jumps = [
+            jump
+            for left, right, jump in jumps
+            if phoneme_spec(left).kind in SONORANT_KINDS and phoneme_spec(right).kind in SONORANT_KINDS
+        ]
+        self.assertTrue(sonorant_jumps)
+        self.assertLess(sum(sonorant_jumps) / len(sonorant_jumps), 0.16)
+
+    def test_v09_phrase_prosody_shortens_unit_gaps_and_marks_stress(self) -> None:
         voice = DEFAULT_CHARACTERS[0].voice.to_dict()
         samples, _, word_cues, _ = synthesize_text("the puppet voice is clear now", voice)
         by_word = {cue["word"]: cue for cue in word_cues}
@@ -169,7 +211,20 @@ class VoiceAudioTests(unittest.TestCase):
     def test_target_phrase_has_audible_consonant_energy(self) -> None:
         phrase = " ".join(DEMO_PHRASES)
         samples, _, _, phoneme_cues = synthesize_text(phrase, DEFAULT_CHARACTERS[0].voice.to_dict())
-        thresholds = {"h": 0.06, "l": 0.1, "k": 0.025, "s": 0.08, "f": 0.08, "m": 0.08, "sh": 0.08, "d": 0.06}
+        thresholds = {
+            "p": 0.03,
+            "t": 0.03,
+            "k": 0.025,
+            "d": 0.06,
+            "s": 0.08,
+            "sh": 0.08,
+            "f": 0.08,
+            "v": 0.08,
+            "h": 0.06,
+            "l": 0.1,
+            "m": 0.08,
+            "n": 0.08,
+        }
         for phoneme, threshold in thresholds.items():
             matches = [cue for cue in phoneme_cues if cue["phoneme"] == phoneme]
             self.assertTrue(matches, phoneme)
@@ -236,6 +291,8 @@ class VoiceAudioTests(unittest.TestCase):
             stale_track["engine_version"] = "puppetvoice-0.6"
             self.assertFalse(audio_track_is_current(stale_track))
             stale_track["engine_version"] = "puppetvoice-0.7"
+            self.assertFalse(audio_track_is_current(stale_track))
+            stale_track["engine_version"] = "puppetvoice-0.8"
             self.assertFalse(audio_track_is_current(stale_track))
             self.assertLess(track.line_cues[0]["start"], track.line_cues[0]["end"])
             with wave.open(track.wav_path, "rb") as wf:
