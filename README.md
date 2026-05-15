@@ -2,7 +2,7 @@
 
 Punch or Judy Studios is a local-first AI puppet show studio powered by the Puppet Forge engine. It lets people create original characters, generate dialogue with local or optional cloud models, synthesize stylized local voices, animate 2D puppets, and export a local render bundle. If FFmpeg is installed, the renderer also produces MP4.
 
-## What Works In This V0.9
+## What Works In This V0.10
 
 - Original bundled cast and scenes.
 - Custom character editor with lore, speech style, personality sliders, voice pitch/pace, and puppet colors.
@@ -10,7 +10,7 @@ Punch or Judy Studios is a local-first AI puppet show studio powered by the Pupp
 - Provider registry for Local Scriptwright, Ollama/local, OpenAI, Claude, Gemini, and a disabled future Sora adapter.
 - Local SQLite storage in the user's app-data folder.
 - Local deterministic script fallback, so no API key is required.
-- Local PuppetVoice v0.9 articulated unit-bank synthesis for the core puppet demo phrases, now with continuous unit-word articulation, smoother internal pitch/formant/energy flow, phrase prosody, shorter unit-word gaps, punctuation pauses, source/filter fallback, line cues, word cues, phoneme cues, visemes, and engine-versioned audio regeneration.
+- Local PuppetVoice v0.10 articulated synthesis for the core puppet demo phrases and normal generated words, now with continuous unit-word articulation, continuous fallback-word articulation, smoother pitch/formant/energy flow, phrase prosody, punctuation pauses, line cues, word cues, phoneme cues, visemes, and engine-versioned audio regeneration.
 - Psiren-inspired PGF audio cleanup, warmth, clarity, declick, and normalization.
 - Local 2D puppet renderer with speaker spotlights, blink/gaze/gesture motion, preview SVG, subtitles, WAV, self-contained ZIP bundles, and optional FFmpeg MP4.
 - Windows-first launcher: double-click `START_HERE_WINDOWS.bat`.

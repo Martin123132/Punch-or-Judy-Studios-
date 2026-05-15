@@ -12,7 +12,7 @@ from .models import AudioTrack
 
 
 SAMPLE_RATE = 22050
-AUDIO_ENGINE_VERSION = "puppetvoice-0.9"
+AUDIO_ENGINE_VERSION = "puppetvoice-0.10"
 CLEAR_BASE_FREQUENCY = 158.0
 WORD_RE = re.compile(r"[a-z0-9]+(?:'[a-z0-9]+)?|[.,!?;:-]")
 PUNCTUATION_PAUSES = {
@@ -244,6 +244,10 @@ STRESSED_UNIT_WORDS: dict[str, float] = {
 SOFT_FUNCTION_WORDS: dict[str, float] = {
     "the": 0.64,
     "is": 0.72,
+    "a": 0.68,
+    "can": 0.84,
+    "this": 0.84,
+    "we": 0.82,
 }
 
 
@@ -861,6 +865,16 @@ def _phrase_pitch(spoken_index: int, total_spoken: int, pitch_swing: float) -> f
     return _phrase_pitch_at(phrase_pos, pitch_swing)
 
 
+def _fallback_consonant_boost(spec: PhonemeSpec, is_final: bool) -> float:
+    if spec.kind == "stop":
+        return 1.18 if is_final else 1.42
+    if spec.kind == "affricate":
+        return 1.28
+    if spec.kind == "fricative":
+        return 1.18 if is_final else 1.32
+    return 1.0
+
+
 def _render_fallback_word(
     word: str,
     state: SourceFilterState,
@@ -884,31 +898,112 @@ def _render_fallback_word(
     vowel_seen = False
     word_stress = _word_stress(word)
     position = _phrase_position(word_index, word_count)
-    for phone in phones:
+    segments: list[dict[str, Any]] = []
+    cursor = 0
+    for index, phone in enumerate(phones):
         spec = phoneme_spec(phone)
-        stress = word_stress * (1.1 if spec.kind == "vowel" and not vowel_seen and len(word) > 3 else 1.0)
+        first_stressed_vowel = spec.kind == "vowel" and not vowel_seen and len(word) > 3
+        stress = word_stress * (1.16 if first_stressed_vowel else 1.0)
         if spec.kind == "vowel":
             vowel_seen = True
-        count = max(1, int(_phoneme_duration(spec, pace, stress) * SAMPLE_RATE))
-        pitch_target = _phrase_pitch(spoken_index, total_spoken, pitch_swing) + (word_stress - 1.0) * 0.034
-        if stress > 1:
-            pitch_target += 0.025
-        before = len(samples)
-        rendered = _render_phoneme(
-            spec,
-            count,
-            state,
-            base,
-            pitch_target,
-            brightness,
-            warmth,
-            grit,
-            energy,
-            sample_offset + len(samples),
+        duration = _phoneme_duration(spec, pace, stress)
+        is_final = index == len(phones) - 1
+        if is_final and spec.kind in {"stop", "fricative", "affricate"}:
+            duration *= 1.08
+        count = max(1, int(duration * SAMPLE_RATE))
+        pitch_target = _phrase_pitch(spoken_index + index, total_spoken, pitch_swing) + (word_stress - 1.0) * 0.034
+        if first_stressed_vowel:
+            pitch_target += 0.028
+        energy_target = energy * clamp(stress, 0.7, 1.18)
+        if is_final and spec.kind in {"stop", "fricative", "affricate"}:
+            energy_target *= 0.9
+        segments.append(
+            {
+                "phone": phone,
+                "spec": spec,
+                "start": cursor,
+                "end": cursor + count,
+                "count": count,
+                "pitch": pitch_target,
+                "energy": energy_target,
+                "consonant": _fallback_consonant_boost(spec, is_final),
+            }
         )
-        _crossfade_append(samples, rendered, fade=_fade_for_kind(spec.kind))
-        start = before / SAMPLE_RATE
-        end = len(samples) / SAMPLE_RATE
+        cursor += count
+
+    for index, segment in enumerate(segments):
+        phone = segment["phone"]
+        spec = segment["spec"]
+        count = segment["count"]
+        previous = segments[index - 1] if index > 0 else None
+        next_segment = segments[index + 1] if index + 1 < len(segments) else None
+        previous_spec = previous["spec"] if previous else None
+        next_spec = next_segment["spec"] if next_segment else None
+        for n in range(count):
+            pos = n / max(1, count - 1)
+            formants = _morphed_unit_tuple(
+                spec.formants,
+                previous_spec.formants if previous_spec else None,
+                next_spec.formants if next_spec else None,
+                spec,
+                previous_spec,
+                next_spec,
+                pos,
+            )
+            amplitudes = _morphed_unit_tuple(
+                spec.amplitudes,
+                previous_spec.amplitudes if previous_spec else None,
+                next_spec.amplitudes if next_spec else None,
+                spec,
+                previous_spec,
+                next_spec,
+                pos,
+            )
+            pitch_target = _morphed_unit_value(
+                segment["pitch"],
+                previous["pitch"] if previous else None,
+                next_segment["pitch"] if next_segment else None,
+                spec,
+                previous_spec,
+                next_spec,
+                pos,
+            )
+            energy_target = _morphed_unit_value(
+                segment["energy"],
+                previous["energy"] if previous else None,
+                next_segment["energy"] if next_segment else None,
+                spec,
+                previous_spec,
+                next_spec,
+                pos,
+            )
+            if previous_spec and previous_spec.kind in {"stop", "fricative", "affricate"} and spec.kind == "vowel" and pos < 0.18:
+                energy_target *= 1.0 + (1.0 - pos / 0.18) * 0.08
+                pitch_target += (1.0 - pos / 0.18) * 0.005
+            samples.append(
+                _render_source_filter_sample(
+                    spec,
+                    count,
+                    n,
+                    state,
+                    base,
+                    pitch_target,
+                    brightness,
+                    warmth,
+                    grit,
+                    energy_target,
+                    sample_offset + segment["start"],
+                    consonant_boost=segment["consonant"],
+                    unit_mode=True,
+                    first=index == 0,
+                    last=index == len(segments) - 1,
+                    formants_override=_scaled_formants(formants, brightness),
+                    amplitudes_override=amplitudes,
+                )
+            )
+
+        start = segment["start"] / SAMPLE_RATE
+        end = segment["end"] / SAMPLE_RATE
         cue = {
             "phoneme": phone,
             "word": word,
@@ -919,12 +1014,14 @@ def _render_fallback_word(
             "render_source": "source-filter-fallback",
             "stress": round(word_stress, 3),
             "phrase_position": round(position, 3),
+            "fallback_mode": "continuous-fallback",
         }
         phoneme_cues.append(cue)
         if spec.viseme != "rest":
             visemes.append({"start": cue["start"], "end": cue["end"], "viseme": spec.viseme, "token": phone})
-        spoken_index += 1
-    return samples, visemes, phoneme_cues, spoken_index
+    if segments:
+        state.previous_formants = segments[-1]["spec"].formants
+    return samples, visemes, phoneme_cues, spoken_index + len(segments)
 
 
 def _lerp_tuple(
@@ -1222,6 +1319,8 @@ def synthesize_text(
         }
         if render_source == "unit-bank":
             word_cue["unit_mode"] = "continuous-unit"
+        elif render_source == "source-filter-fallback":
+            word_cue["fallback_mode"] = "continuous-fallback"
         word_cues.append(word_cue)
         if index < len(tokens) - 1:
             next_token = tokens[index + 1]

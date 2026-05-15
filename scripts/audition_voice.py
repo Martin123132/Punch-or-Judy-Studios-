@@ -15,12 +15,14 @@ from puppet_forge.voice import AUDIO_ENGINE_VERSION, SAMPLE_RATE, synthesize_tex
 
 
 PHRASE_SETS = {
-    "v0.9-clear-core": [
+    "v0.10-fallback-core": [
         "the puppet voice is clear now",
         "hello local stage",
         "sound first, motion second",
-        "the voice is clear",
-        "puppet voice now",
+        "the local puppet wakes up",
+        "we make a tiny show",
+        "bright shadows dance across the stage",
+        "this voice can speak new words",
     ]
 }
 
@@ -35,7 +37,7 @@ def _metrics(samples: list[float]) -> dict[str, float]:
 
 
 def main() -> None:
-    phrase_set = "v0.9-clear-core"
+    phrase_set = "v0.10-fallback-core"
     phrases = PHRASE_SETS[phrase_set]
     out_dir = outputs_dir() / "voice-auditions" / phrase_set
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -63,6 +65,7 @@ def main() -> None:
                             "word": cue["word"],
                             "render_source": cue.get("render_source", "unknown"),
                             "unit_mode": cue.get("unit_mode"),
+                            "fallback_mode": cue.get("fallback_mode"),
                         }
                         for cue in word_cues
                     ],
