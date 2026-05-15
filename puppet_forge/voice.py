@@ -12,7 +12,7 @@ from .models import AudioTrack
 
 
 SAMPLE_RATE = 22050
-AUDIO_ENGINE_VERSION = "puppetvoice-0.10"
+AUDIO_ENGINE_VERSION = "puppetvoice-0.11"
 CLEAR_BASE_FREQUENCY = 158.0
 WORD_RE = re.compile(r"[a-z0-9]+(?:'[a-z0-9]+)?|[.,!?;:-]")
 PUNCTUATION_PAUSES = {
@@ -105,25 +105,43 @@ CONTRACTIONS = {
 
 EXCEPTION_WORDS: dict[str, list[str]] = {
     "a": ["ah"],
+    "about": ["ah", "b", "aw", "t"],
     "ai": ["ay"],
     "and": ["ae", "n", "d"],
+    "answer": ["ae", "n", "s", "er"],
     "are": ["aa", "r"],
+    "around": ["ah", "r", "aw", "n", "d"],
+    "bright": ["b", "r", "ay", "t"],
+    "curious": ["k", "y", "oo", "r", "ee", "ah", "s"],
+    "curtain": ["k", "er", "t", "ah", "n"],
     "clear": ["k", "l", "ee", "r"],
     "dance": ["d", "ae", "n", "s"],
+    "every": ["eh", "v", "r", "ee"],
     "first": ["f", "er", "s", "t"],
+    "friend": ["f", "r", "eh", "n", "d"],
+    "gather": ["g", "ae", "dh", "er"],
+    "gentle": ["j", "eh", "n", "t", "ah", "l"],
     "hello": ["h", "eh", "l", "oh"],
+    "idea": ["ay", "d", "ee", "ah"],
     "is": ["ih", "z"],
+    "little": ["l", "ih", "t", "ah", "l"],
     "local": ["l", "oh", "k", "ah", "l"],
+    "magic": ["m", "ae", "j", "ih", "k"],
     "motion": ["m", "oh", "sh", "ah", "n"],
+    "new": ["n", "oo"],
     "now": ["n", "aw"],
     "of": ["ah", "v"],
     "one": ["w", "uh", "n"],
+    "open": ["oh", "p", "ah", "n"],
     "puppet": ["p", "uh", "p", "eh", "t"],
+    "remember": ["r", "ih", "m", "eh", "m", "b", "er"],
     "second": ["s", "eh", "k", "ah", "n", "d"],
+    "shadow": ["sh", "ae", "d", "oh"],
     "show": ["sh", "oh"],
     "sound": ["s", "aw", "n", "d"],
     "speech": ["s", "p", "ee", "ch"],
     "stage": ["s", "t", "ay", "j"],
+    "story": ["s", "t", "oh", "r", "ee"],
     "the": ["dh", "uh"],
     "them": ["dh", "eh", "m"],
     "then": ["dh", "eh", "n"],
@@ -136,11 +154,16 @@ EXCEPTION_WORDS: dict[str, list[str]] = {
     "though": ["dh", "oh"],
     "thought": ["th", "aw", "t"],
     "through": ["th", "r", "oo"],
+    "tiny": ["t", "ay", "n", "ee"],
     "to": ["t", "oo"],
     "voice": ["v", "oh", "ee", "s"],
     "was": ["w", "ah", "z"],
+    "word": ["w", "er", "d"],
     "you": ["y", "oo"],
 }
+
+UNVOICED_SUFFIX_PHONEMES = {"p", "t", "k", "f", "th", "s", "sh", "ch"}
+SIBILANT_SUFFIX_PHONEMES = {"s", "z", "sh", "ch", "j", "zh"}
 
 
 def _g(symbol: str, duration: float, energy: float = 1.0, pitch: float = 0.0, consonant: float = 1.0) -> UnitGesture:
@@ -240,6 +263,25 @@ STRESSED_UNIT_WORDS: dict[str, float] = {
     "stage": 1.14,
     "sound": 1.12,
     "motion": 1.13,
+}
+STRESSED_FALLBACK_WORDS: dict[str, float] = {
+    "answer": 1.08,
+    "bright": 1.12,
+    "curious": 1.08,
+    "curtain": 1.04,
+    "dance": 1.1,
+    "every": 1.04,
+    "friend": 1.06,
+    "gather": 1.06,
+    "gentle": 1.06,
+    "idea": 1.08,
+    "magic": 1.1,
+    "open": 1.06,
+    "remember": 1.06,
+    "shadow": 1.08,
+    "story": 1.08,
+    "tiny": 1.08,
+    "word": 1.04,
 }
 SOFT_FUNCTION_WORDS: dict[str, float] = {
     "the": 0.64,
@@ -356,9 +398,42 @@ def g2p_word(word: str) -> list[str]:
         return []
     if word in EXCEPTION_WORDS:
         return EXCEPTION_WORDS[word][:]
+    if word.endswith("ing") and len(word) > 5:
+        root_text = word[:-3]
+        if len(root_text) > 2 and root_text[-1] == root_text[-2] and root_text[-1] not in "aeiouy":
+            root_text = root_text[:-1]
+        return g2p_word(root_text) + ["ih", "ng"]
     if word.endswith("ed") and len(word) > 3:
-        root = g2p_word(word[:-2])
-        return root + (["ih", "d"] if word[-3] in {"t", "d"} else ["d"])
+        if word[:-1] in EXCEPTION_WORDS:
+            base = word[:-1]
+        elif word[:-2] in EXCEPTION_WORDS:
+            base = word[:-2]
+        else:
+            base = word[:-1] if word[:-1].endswith("e") else word[:-2]
+        root = g2p_word(base)
+        if not root:
+            return []
+        if root[-1] in {"t", "d"}:
+            return root + ["ih", "d"]
+        if root[-1] in UNVOICED_SUFFIX_PHONEMES:
+            return root + ["t"]
+        return root + ["d"]
+    if word.endswith("ies") and len(word) > 4:
+        return g2p_word(word[:-3] + "y") + ["z"]
+    if word.endswith("es") and len(word) > 3:
+        base = word[:-1] if word[:-1] in EXCEPTION_WORDS or word[:-1].endswith("e") else word[:-2]
+        root = g2p_word(base)
+        if not root:
+            return []
+        if root[-1] in SIBILANT_SUFFIX_PHONEMES:
+            return root + ["ih", "z"]
+        suffix = "s" if root[-1] in UNVOICED_SUFFIX_PHONEMES else "z"
+        return root + [suffix]
+    if word.endswith("s") and len(word) > 3 and not word.endswith("ss"):
+        root = g2p_word(word[:-1])
+        if root:
+            suffix = "ih z".split() if root[-1] in SIBILANT_SUFFIX_PHONEMES else ["s" if root[-1] in UNVOICED_SUFFIX_PHONEMES else "z"]
+            return root + suffix
 
     groups = [
         ("tion", ["sh", "ah", "n"]),
@@ -369,6 +444,9 @@ def g2p_word(word: str) -> list[str]:
         ("ough", ["oh"]),
         ("air", ["eh", "r"]),
         ("ear", ["ee", "r"]),
+        ("ew", ["oo"]),
+        ("ir", ["er"]),
+        ("ur", ["er"]),
         ("er", ["er"]),
         ("ar", ["aa", "r"]),
         ("or", ["oh", "r"]),
@@ -516,7 +594,31 @@ def _pause_duration(punctuation: str | None, pace: float) -> float:
 
 
 def _word_stress(word: str) -> float:
-    return SOFT_FUNCTION_WORDS.get(word, STRESSED_UNIT_WORDS.get(word, 1.0))
+    if word in SOFT_FUNCTION_WORDS:
+        return SOFT_FUNCTION_WORDS[word]
+    if word in STRESSED_UNIT_WORDS:
+        return STRESSED_UNIT_WORDS[word]
+    if word in STRESSED_FALLBACK_WORDS:
+        return STRESSED_FALLBACK_WORDS[word]
+    roots = []
+    if word.endswith("ies") and len(word) > 4:
+        roots.append(word[:-3] + "y")
+    if word.endswith("es") and len(word) > 3:
+        roots.extend([word[:-1], word[:-2]])
+    if word.endswith(("s", "d")) and len(word) > 3:
+        roots.append(word[:-1])
+    if word.endswith("ed") and len(word) > 3:
+        roots.extend([word[:-1], word[:-2]])
+    if word.endswith("ing") and len(word) > 5:
+        roots.append(word[:-3])
+    for root in roots:
+        if root in SOFT_FUNCTION_WORDS:
+            return SOFT_FUNCTION_WORDS[root]
+        if root in STRESSED_UNIT_WORDS:
+            return STRESSED_UNIT_WORDS[root]
+        if root in STRESSED_FALLBACK_WORDS:
+            return STRESSED_FALLBACK_WORDS[root]
+    return 1.0
 
 
 def _stress_duration_scale(stress: float) -> float:

@@ -51,6 +51,13 @@ FALLBACK_PHRASES = [
     "this voice can speak new words",
 ]
 
+PRONUNCIATION_PHRASES = [
+    "curious little shadows gather around the stage",
+    "every puppet remembers a tiny story",
+    "gentle voices answer with bright ideas",
+    "magic curtains open for new friends",
+]
+
 
 def _spoken_words(text: str) -> list[str]:
     return [word.strip(".,!?;:-") for word in text.split() if word.strip(".,!?;:-")]
@@ -118,6 +125,17 @@ class VoiceAudioTests(unittest.TestCase):
             "puppet": ["p", "uh", "p", "eh", "t"],
             "through": ["th", "r", "oo"],
             "dance": ["d", "ae", "n", "s"],
+            "curious": ["k", "y", "oo", "r", "ee", "ah", "s"],
+            "little": ["l", "ih", "t", "ah", "l"],
+            "shadows": ["sh", "ae", "d", "oh", "z"],
+            "voices": ["v", "oh", "ee", "s", "ih", "z"],
+            "ideas": ["ay", "d", "ee", "ah", "z"],
+            "friends": ["f", "r", "eh", "n", "d", "z"],
+            "remembers": ["r", "ih", "m", "eh", "m", "b", "er", "z"],
+            "curtains": ["k", "er", "t", "ah", "n", "z"],
+            "opened": ["oh", "p", "ah", "n", "d"],
+            "danced": ["d", "ae", "n", "s", "t"],
+            "gathering": ["g", "ae", "dh", "er", "ih", "ng"],
         }
         for word, phones in expected.items():
             self.assertEqual(g2p_word(word), phones)
@@ -149,8 +167,8 @@ class VoiceAudioTests(unittest.TestCase):
         self.assertGreater(rms(samples), 0.02)
         self.assertTrue(any(unit in {"ee", "oh", "ae"} for unit in phoneme_units("hello local stage")))
 
-    def test_v010_demo_phrases_use_unit_bank_with_aligned_cues(self) -> None:
-        self.assertEqual(AUDIO_ENGINE_VERSION, "puppetvoice-0.10")
+    def test_v011_demo_phrases_use_unit_bank_with_aligned_cues(self) -> None:
+        self.assertEqual(AUDIO_ENGINE_VERSION, "puppetvoice-0.11")
         self.assertEqual(UNIT_BANK_WORDS, EXPECTED_UNIT_BANK_WORDS)
         self.assertTrue(DEMO_WORDS.issubset(UNIT_BANK_WORDS))
         for phrase in DEMO_PHRASES:
@@ -174,7 +192,7 @@ class VoiceAudioTests(unittest.TestCase):
             self.assertGreater(rms(samples), 0.08)
             self.assertLessEqual(max(abs(sample) for sample in samples), 1.0)
 
-    def test_v010_continuous_unit_rendering_is_stable_and_smooth(self) -> None:
+    def test_v011_continuous_unit_rendering_is_stable_and_smooth(self) -> None:
         voice = DEFAULT_CHARACTERS[0].voice.to_dict()
         first = synthesize_text(" ".join(DEMO_PHRASES), voice)
         second = synthesize_text(" ".join(DEMO_PHRASES), voice)
@@ -199,7 +217,7 @@ class VoiceAudioTests(unittest.TestCase):
         self.assertTrue(sonorant_jumps)
         self.assertLess(sum(sonorant_jumps) / len(sonorant_jumps), 0.16)
 
-    def test_v010_phrase_prosody_shortens_unit_gaps_and_marks_stress(self) -> None:
+    def test_v011_phrase_prosody_shortens_unit_gaps_and_marks_stress(self) -> None:
         voice = DEFAULT_CHARACTERS[0].voice.to_dict()
         samples, _, word_cues, _ = synthesize_text("the puppet voice is clear now", voice)
         by_word = {cue["word"]: cue for cue in word_cues}
@@ -220,9 +238,9 @@ class VoiceAudioTests(unittest.TestCase):
         self.assertGreater(gaps[("first", "motion")], gaps[("sound", "first")] + 0.07)
         self.assertLess(gaps[("motion", "second")], 0.06)
 
-    def test_v010_fallback_acceptance_phrases_use_continuous_fallback(self) -> None:
+    def test_v011_fallback_acceptance_phrases_use_continuous_fallback(self) -> None:
         voice = DEFAULT_CHARACTERS[0].voice.to_dict()
-        for phrase in FALLBACK_PHRASES:
+        for phrase in FALLBACK_PHRASES + PRONUNCIATION_PHRASES:
             first = synthesize_text(phrase, voice)
             second = synthesize_text(phrase, voice)
             samples, visemes, word_cues, phoneme_cues = first
@@ -249,9 +267,24 @@ class VoiceAudioTests(unittest.TestCase):
                 self.assertGreaterEqual(phones[0]["start"], word["start"])
                 self.assertLessEqual(phones[-1]["end"], word["end"] + 0.01)
 
-    def test_v010_fallback_transitions_are_smooth_and_consonants_present(self) -> None:
+    def test_v011_pronunciation_phrases_keep_fallback_stress_and_metadata(self) -> None:
         voice = DEFAULT_CHARACTERS[0].voice.to_dict()
-        samples, _, word_cues, phoneme_cues = synthesize_text(" ".join(FALLBACK_PHRASES), voice)
+        stressed_words = {"curious", "shadows", "gather", "every", "remembers", "tiny", "story", "gentle", "voices", "answer", "bright", "ideas", "magic", "curtains", "open", "friends"}
+        for phrase in PRONUNCIATION_PHRASES:
+            samples, _, word_cues, phoneme_cues = synthesize_text(phrase, voice)
+            self.assertGreater(rms(samples), 0.08)
+            for word in word_cues:
+                if word["word"] in stressed_words:
+                    self.assertGreaterEqual(word["stress"], 1.0, word["word"])
+                if word["render_source"] == "source-filter-fallback":
+                    self.assertEqual(word.get("fallback_mode"), "continuous-fallback")
+            fallback_phones = [cue for cue in phoneme_cues if cue.get("fallback_mode") == "continuous-fallback"]
+            self.assertTrue(fallback_phones)
+            self.assertTrue(any(cue["phoneme"] in {"z", "ih", "ng", "er", "oo"} for cue in fallback_phones))
+
+    def test_v011_fallback_transitions_are_smooth_and_consonants_present(self) -> None:
+        voice = DEFAULT_CHARACTERS[0].voice.to_dict()
+        samples, _, word_cues, phoneme_cues = synthesize_text(" ".join(FALLBACK_PHRASES + PRONUNCIATION_PHRASES), voice)
         self.assertTrue(any(cue.get("fallback_mode") == "continuous-fallback" for cue in word_cues))
         jumps = _fallback_transition_jumps(samples, phoneme_cues)
         self.assertTrue(jumps)
@@ -385,6 +418,8 @@ class VoiceAudioTests(unittest.TestCase):
             stale_track["engine_version"] = "puppetvoice-0.8"
             self.assertFalse(audio_track_is_current(stale_track))
             stale_track["engine_version"] = "puppetvoice-0.9"
+            self.assertFalse(audio_track_is_current(stale_track))
+            stale_track["engine_version"] = "puppetvoice-0.10"
             self.assertFalse(audio_track_is_current(stale_track))
             self.assertLess(track.line_cues[0]["start"], track.line_cues[0]["end"])
             with wave.open(track.wav_path, "rb") as wf:

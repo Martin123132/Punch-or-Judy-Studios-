@@ -15,7 +15,7 @@ from puppet_forge.voice import AUDIO_ENGINE_VERSION, SAMPLE_RATE, synthesize_tex
 
 
 PHRASE_SETS = {
-    "v0.10-fallback-core": [
+    "v0.11-pronunciation-core": [
         "the puppet voice is clear now",
         "hello local stage",
         "sound first, motion second",
@@ -23,6 +23,10 @@ PHRASE_SETS = {
         "we make a tiny show",
         "bright shadows dance across the stage",
         "this voice can speak new words",
+        "curious little shadows gather around the stage",
+        "every puppet remembers a tiny story",
+        "gentle voices answer with bright ideas",
+        "magic curtains open for new friends",
     ]
 }
 
@@ -37,7 +41,7 @@ def _metrics(samples: list[float]) -> dict[str, float]:
 
 
 def main() -> None:
-    phrase_set = "v0.10-fallback-core"
+    phrase_set = "v0.11-pronunciation-core"
     phrases = PHRASE_SETS[phrase_set]
     out_dir = outputs_dir() / "voice-auditions" / phrase_set
     out_dir.mkdir(parents=True, exist_ok=True)
