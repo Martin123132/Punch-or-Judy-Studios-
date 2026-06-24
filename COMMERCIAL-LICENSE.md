@@ -8,7 +8,7 @@ Examples that require a commercial license:
 
 - adding Punch-or-Judy-Studios- features to a paid coding assistant or AI agent product;
 - running Punch-or-Judy-Studios- as part of a SaaS, API, hosted MCP server, or managed repository-analysis service;
-- embedding Punch-or-Judy-Studios- code, schemas, tests, pack format, or derived implementation details into a commercial tool;
+- embedding Punch-or-Judy-Studios- code, schemas, tests, formats, or derived implementation details into a commercial tool;
 - using Punch-or-Judy-Studios- materials to train, fine-tune, distill, evaluate, benchmark, or improve a commercial AI model or commercial AI system;
 - distributing a modified commercial version of Punch-or-Judy-Studios-.
 
